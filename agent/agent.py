@@ -91,9 +91,35 @@ def run_action(action, room_name=None):
         try:
             content = pyperclip.paste()
             print(f"[INFO] Clipboard: {content}")
-            return content
+            # Tách code mời từ nội dung clipboard
+            match = re.search(r'Code mời:\s*([a-z0-9]+)', content)
+            if match:
+                return match.group(1)
+            else:
+                print("[WARN] Không tìm thấy code trong clipboard")
+                return None
         except Exception as e:
             print(f"[ERROR] Không đọc được clipboard: {e}")
+
+
+
+    elif action_type == "ocr_copy":
+        region = action.get("region")
+        if not region:
+            print("[WARN] Thiếu region cho action 'ocr_copy'")
+            return None
+        try:
+            screenshot = pyautogui.screenshot(region=region)
+            text = pytesseract.image_to_string(screenshot, config="--psm 6")
+            text = text.strip()
+            if text:
+                pyperclip.copy(text)
+                print(f"[INFO] OCR text copied to clipboard: {text}")
+                return text
+            else:
+                print("[WARN] OCR không nhận được text nào.")
+        except Exception as e:
+            print(f"[ERROR] Lỗi OCR: {e}")
 
     elif action_type == "click_min_number":
         region = action.get("region")
@@ -151,7 +177,7 @@ def run_action(action, room_name=None):
         except Exception as e:
             print(f"[ERROR] Lỗi khi click_bottom_icon: {e}")
 
-    elif action_type == "close_app":  # 🔥 thay adb bằng click nút X
+    elif action_type == "close_app":
         image_path = action.get("image", "images/oslink_x.png")
         try:
             location = pyautogui.locateCenterOnScreen(image_path, confidence=0.8)
@@ -177,16 +203,19 @@ def run_action(action, room_name=None):
     return None
 
 
-
-
 def run_script(file_path="actions_create_room.json", room_name=None):
     actions = load_actions(file_path)
-    room_code = None
+    room_code_parts = []
+    
     for action in actions:
         result = run_action(action, room_name=room_name)
-        if result:  # lấy room_code từ clipboard
-            room_code = result
-    return room_code
+        if result:  # lưu kết quả vào danh sách
+            room_code_parts.append(str(result).strip())
+    
+    # nối các phần bằng khoảng trắng
+    room_code = " ".join(room_code_parts)
+    return room_code if room_code else None
+
 
 # ---------- Business Logic ----------
 def create_room_oslink():

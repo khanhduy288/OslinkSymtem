@@ -29,13 +29,15 @@
   { 
     "type": "click_bottom_icon", 
     "image": "images/android_blue.png", 
-    "region": [687, 112, 530, 772] 
+    "region": [691, 101, 534, 846] 
   },
   { "type": "wait", "seconds": 3 },
   { "type": "click", "image": "images/confirmadd.png" },
   { "type": "wait", "seconds": 3 },
   { "type": "click", "image": "images/startld.png" },
   { "type": "wait", "seconds": 10 },
+  {"type": "ocr_copy", "region": [710, 65, 70, 28]},
+  { "type": "wait", "seconds": 2 },
   { "type": "click", "image": "images/openmenu.png" },
   { "type": "wait", "seconds": 3 },
   { "type": "click", "image": "images/moivao.png" },
