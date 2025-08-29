@@ -4,156 +4,217 @@ import pyperclip
 import time
 import threading
 import requests
+import json
+import os
+import pytesseract
+import re
+import pygetwindow as gw
+from flask_cors import CORS
+from PIL import Image
 
 app = Flask(__name__)
-
+CORS(app)
+ACTIONS_FILE = "actions_create_room.json"
 BACKEND_API = "http://localhost:5000"  # địa chỉ backend
 ROOMS = {}  # lưu thông tin room đang thuê: userId -> {'room_code':..., 'end_time':...}
+pytesseract.pytesseract.tesseract_cmd = r"C:\project12m\OslinkSymtem\tessat\tesseract.exe"
+# Chụp màn hình khu vực (x, y, width, height)
+region = (1631, 189, 126, 247)  # chỉnh lại theo màn hình của bạn
 
-# ================= Helper thao tác trên Oslink/LDPlayer =================
-def open_ldplayer():
-    pyautogui.press('win')
-    time.sleep(0.5)
-    pyautogui.write('LDPlayer')
-    pyautogui.press('enter')
-    time.sleep(5)  # đợi LDPlayer mở
+
+# ---------- Load & Run Action Script ----------
+def load_actions(file_path="actions_create_room.json"):
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Không tìm thấy file action: {file_path}")
+    with open(file_path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 import time
 import pyautogui
+import pyperclip
+import pytesseract
+import re
 
+def run_action(action, room_name=None):
+    action_type = action.get("type")
+
+    if action_type == "wait":
+        seconds = action.get("seconds", 1)
+        print(f"[INFO] Waiting {seconds}s...")
+        time.sleep(seconds)
+
+    elif action_type == "click":
+        image_path = action.get("image")
+        if image_path:
+            try:
+                location = pyautogui.locateCenterOnScreen(image_path, confidence=0.8)
+                if location:
+                    pyautogui.click(location)
+                    print(f"[INFO] Clicked on image: {image_path}")
+                else:
+                    print(f"[WARN] Không tìm thấy hình ảnh {image_path}")
+            except Exception as e:
+                print(f"[ERROR] Lỗi khi tìm ảnh: {e}")
+        else:
+            x, y = action.get("x"), action.get("y")
+            if x is not None and y is not None:
+                pyautogui.click(x, y)
+                print(f"[INFO] Click tại tọa độ ({x}, {y})")
+            else:
+                print("[WARN] Không có 'image' hoặc (x, y) hợp lệ.")
+
+    elif action_type == "type":
+        text = action.get("text", "")
+        if room_name:
+            text = text.replace("{room_name}", room_name)
+        pyautogui.typewrite(text)
+        print(f"[INFO] Gõ: {text}")
+
+    elif action_type == "type_room_name":
+        prefix = action.get("prefix", "khach")
+        counter_file = action.get("counter_file", "room_counter.txt")
+        try:
+            with open(counter_file, "r") as f:
+                counter = int(f.read().strip())
+        except FileNotFoundError:
+            counter = 1
+
+        room_name = f"{prefix}{counter}"
+        pyautogui.typewrite(room_name)
+        print(f"[INFO] Nhập room_name: {room_name}")
+
+        counter += 1
+        with open(counter_file, "w") as f:
+            f.write(str(counter))
+
+    elif action_type == "copy_clipboard":
+        try:
+            content = pyperclip.paste()
+            print(f"[INFO] Clipboard: {content}")
+            return content
+        except Exception as e:
+            print(f"[ERROR] Không đọc được clipboard: {e}")
+
+    elif action_type == "click_min_number":
+        region = action.get("region")
+        if region:
+            screenshot = pyautogui.screenshot(region=region)
+            text = pytesseract.image_to_string(screenshot, config="--psm 6 digits")
+            print("OCR text:\n", text)
+            numbers = [int(num) for num in re.findall(r"\d+", text)]
+            if numbers:
+                min_num = min(numbers)
+                print(f"Số nhỏ nhất: {min_num}")
+                x = region[0] + region[2] // 2
+                y = region[1] + region[3] // 2
+                pyautogui.click(x, y)
+                print(f"[INFO] Click vào số nhỏ nhất tại ({x}, {y})")
+            else:
+                print("[WARN] Không tìm thấy số nào trong vùng.")
+        else:
+            print("[WARN] Không có region trong action 'click_min_number'.")
+
+    elif action_type == "click_bottom_icon":
+        image_path = action.get("image")
+        region = action.get("region")
+        try:
+            import cv2
+            import numpy as np
+
+            if region:
+                screenshot = pyautogui.screenshot(region=region)
+                offset_x, offset_y = region[0], region[1]
+            else:
+                screenshot = pyautogui.screenshot()
+                offset_x, offset_y = 0, 0
+
+            screen_np = np.array(screenshot)
+            screen_gray = cv2.cvtColor(screen_np, cv2.COLOR_BGR2GRAY)
+
+            template = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+            template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+            w, h = template_gray.shape[::-1]
+
+            res = cv2.matchTemplate(screen_gray, template_gray, cv2.TM_CCOEFF_NORMED)
+            threshold = 0.8
+            loc = np.where(res >= threshold)
+            positions = list(zip(*loc[::-1]))
+
+            if positions:
+                bottom_most = max(positions, key=lambda p: p[1])
+                x_click = offset_x + bottom_most[0] + w // 2
+                y_click = offset_y + bottom_most[1] + h // 2
+                pyautogui.click(x_click, y_click)
+                print(f"[INFO] Click vào biểu tượng Android màu xanh tại ({x_click}, {y_click})")
+            else:
+                print("[WARN] Không tìm thấy biểu tượng Android màu xanh")
+        except Exception as e:
+            print(f"[ERROR] Lỗi khi click_bottom_icon: {e}")
+
+    elif action_type == "close_app":  # 🔥 thay adb bằng click nút X
+        image_path = action.get("image", "images/oslink_x.png")
+        try:
+            location = pyautogui.locateCenterOnScreen(image_path, confidence=0.8)
+            if location:
+                pyautogui.click(location)
+                print(f"[INFO] Click nút X để đóng app (ảnh: {image_path})")
+            else:
+                print(f"[ERROR] Không tìm thấy nút X (ảnh: {image_path})")
+        except Exception as e:
+            print(f"[ERROR] Lỗi khi click X để đóng app: {e}")
+
+    elif action_type == "scroll_down_max":
+        print("[INFO] Scrolling down to max...")
+        pyautogui.scroll(-9999999)
+
+    elif action_type == "scroll_up_max":
+        print("[INFO] Scrolling up to max...")
+        pyautogui.scroll(9999999)
+
+    else:
+        print(f"[WARN] Action chưa hỗ trợ: {action_type}")
+
+    return None
+
+
+
+
+def run_script(file_path="actions_create_room.json", room_name=None):
+    actions = load_actions(file_path)
+    room_code = None
+    for action in actions:
+        result = run_action(action, room_name=room_name)
+        if result:  # lấy room_code từ clipboard
+            room_code = result
+    return room_code
+
+# ---------- Business Logic ----------
 def create_room_oslink():
-    # --- Lấy số thứ tự room từ file ---
+    # Lấy số thứ tự room
     try:
         with open("room_counter.txt", "r") as f:
             counter = int(f.read().strip())
     except FileNotFoundError:
-        counter = 1  # lần đầu tiên
+        counter = 1
 
     room_name = f"khach{counter}"
-    print(f"[INFO] Tên room: {room_name}")
+    print(f"[INFO] Room name: {room_name}")
 
-    # --- Click lần đầu ---
-    time.sleep(2)
-    x1, y1 = 963, 297
-    pyautogui.click(x1, y1)
-    print(f"[INFO] Click vào tọa độ x={x1}, y={y1}")
-
-    # --- Click đóng QC ---
-    time.sleep(11)
-    x2, y2 = 957, 769
-    pyautogui.click(x2, y2)
-    print(f"[INFO] Click vào tọa độ x={x2}, y={y2}")
-
-    # --- Click cùng chơi ---
-    time.sleep(3)
-    x3, y3 = 1163, 945
-    pyautogui.click(x3, y3)
-    print(f"[INFO] Click vào tọa độ x={x3}, y={y3}")
-
-    # --- Click tạo room ---
-    time.sleep(3)
-    x4, y4 = 1621, 145
-    pyautogui.click(x4, y4)
-    print(f"[INFO] Click vào tọa độ x={x4}, y={y4}")
-
-    # --- Click nhập tên room ---
-    time.sleep(3)
-    x5, y5 = 887, 132
-    pyautogui.click(x5, y5)
-    pyautogui.typewrite(room_name)
-    print(f"[INFO] Nhập tên room: {room_name}")
-
-    time.sleep(3)
-
-    # --- Cập nhật counter ---
+    # Tăng counter
     counter += 1
     with open("room_counter.txt", "w") as f:
         f.write(str(counter))
 
-        # --- Click lần 6 ấn button tạo room
-    time.sleep(3)
-    x6, y6 = 951, 193
-    pyautogui.click(x6, y6)
-    print(f"[INFO] Click vào tọa độ x={x6}, y={y6}")
-
-
-    time.sleep(3)
-    x7, y7 = 751, 285
-    pyautogui.click(x7, y7)
-    print(f"[INFO] Click vào tọa độ x={x7}, y={y7}")
-
-    time.sleep(5)
-    x8, y8 = 702, 135
-    pyautogui.click(x8, y8)
-    print(f"[INFO] Click vào tọa độ x={x8}, y={y8}")
-
-    time.sleep(3)
-    x9, y9 = 962, 982
-    pyautogui.click(x9, y9)
-    print(f"[INFO] Click vào tọa độ x={x9}, y={y9}")
-    time.sleep(2)
-
-    x10, y10 = 1217, 76
-    pyautogui.click(x10, y10)
-    print(f"[INFO] Click vào tọa độ x={x10}, y={y10}")
-    time.sleep(2)
-    
-
-    x11, y11 = 1151, 219
-    pyautogui.click(x11, y11)
-    print(f"[INFO] Click vào tọa độ x={x11}, y={y11}")
-    time.sleep(2)
-
-    x12, y12 = 1008, 913
-    pyautogui.click(x12, y12)
-    print(f"[INFO] Click vào tọa độ x={x12}, y={y12}")
-    time.sleep(2)
-
-    x13, y13 = 1031, 578
-    pyautogui.click(x13, y13)
-    print(f"[INFO] Click vào tọa độ x={x13}, y={y13}")
-    time.sleep(3)
-
-    x14, y14 = 1031, 578
-    pyautogui.click(x14, y14)
-    print(f"[INFO] Click vào tọa độ x={x14}, y={y14}")
-    time.sleep(3)
-
-    # === Xong toàn bộ, return room_code ===
-    room_code = pyperclip.paste()
-    print(f"[INFO] Room code lấy được: {room_code}")
-
+    # Chạy script JSON
+    room_code = run_script("actions_create_room.json", room_name=room_name)
 
     return room_code
-
-def add_device_to_room():
-    # Click Add Device
-    pyautogui.click(x=200, y=300)  # chỉnh tọa độ
-    time.sleep(1)
-
-def close_room_oslink():
-    # Vào Cùng chơi -> vào room -> tắt tab -> xóa room
-    pyautogui.click(x=100, y=200)
-    time.sleep(1)
-    pyautogui.click(x=120, y=250)
-    time.sleep(1)
-    pyautogui.click(x=300, y=400)  # tắt tab
-    time.sleep(1)
-    pyautogui.click(x=150, y=300)  # xóa room
-    time.sleep(1)
-
-def remove_device_ldplayer():
-    # Vào LdPlayer -> máy chủ chứa thiết bị -> Xóa thiết bị
-    pyautogui.click(x=500, y=200)
-    time.sleep(1)
-    pyautogui.click(x=520, y=250)
-    time.sleep(1)
 
 # ================= Task quản lý thời gian thuê =================
 def schedule_room_close(userId, rentalTime):
     def task():
         time.sleep(rentalTime * 60 * 60)  # giờ -> giây
-        print(f"[INFO] Hết hạn thuê room của user {userId}")
+        print(f"[INFO] Hết hạn thuê room user {userId}")
         close_room_oslink()
         remove_device_ldplayer()
         ROOMS.pop(userId, None)
@@ -166,42 +227,51 @@ def command():
     action = data.get('action')
     userId = data.get('userId')
     rentalTime = data.get('rentalTime')
-    rentalId = data.get('rentalId')   # 👈 thêm rentalId
+    rentalId = data.get('rentalId')
 
     if action == 'create_room':
         print(f"[INFO] Tạo room cho user {userId}")
-        open_ldplayer()
         room_code = create_room_oslink()
-        add_device_to_room()
         ROOMS[userId] = {'room_code': room_code}
         schedule_room_close(userId, rentalTime)
 
-        # ==== PATCH roomCode vào BE NodeJS ====
         try:
             res = requests.patch(
                 f"{BACKEND_API}/rentals/{rentalId}",
                 json={'roomCode': room_code, 'status': 'active'}
             )
-            print(f"[INFO] Đã PATCH roomCode={room_code} -> rentalId={rentalId}, status={res.status_code}")
+            print(f"[INFO] PATCH roomCode={room_code} rentalId={rentalId}, status={res.status_code}")
         except Exception as e:
-            print(f"[ERR] Không PATCH được roomCode: {e}")
+            print(f"[ERR] PATCH thất bại: {e}")
 
         return jsonify({'status': 'ok', 'room_code': room_code})
     
     elif action == 'close_room':
-        print(f"[INFO] Đóng room cho user {userId}")
-        close_room_oslink()
-        remove_device_ldplayer()
+        print(f"[INFO] Đóng room user {userId}")
         ROOMS.pop(userId, None)
         return jsonify({'status': 'ok'})
     
     return jsonify({'status': 'unknown action'})
-
 
 @app.route("/create-room", methods=["POST"])
 def create_room():
     room_code = create_room_oslink()
     return jsonify({"room_code": room_code})
 
+@app.route("/actions", methods=["GET"])
+def get_actions():
+    if not os.path.exists(ACTIONS_FILE):
+        return jsonify([])  # trả về mảng rỗng nếu chưa có
+    with open(ACTIONS_FILE, "r", encoding="utf-8") as f:
+        actions = json.load(f)
+    return jsonify(actions)
+
+@app.route("/actions", methods=["POST"])
+def save_actions():
+    data = request.json
+    with open(ACTIONS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return jsonify({"status": "ok"})
+
 if __name__ == '__main__':
-    app.run(port=6000)
+    app.run(port=5001)

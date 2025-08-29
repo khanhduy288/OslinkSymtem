@@ -79,7 +79,7 @@ app.post("/rentals", async (req, res) => {
     });
 
     // 2. Gọi Python API (gửi rentalId để Python tự PATCH ngược về)
-axios.post("http://127.0.0.1:6000/command", {
+axios.post("http://127.0.0.1:5001/command", {
   action: "create_room",
   userId,
   rentalTime,

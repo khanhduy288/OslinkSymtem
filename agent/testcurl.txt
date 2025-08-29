@@ -1,0 +1,1 @@
+curl -X POST http://127.0.0.1:5001/command -H "Content-Type: application/json" -d "{\"action\":\"create_room\",\"userId\":\"user123\",\"rentalTime\":1,\"rentalId\":\"abc123\"}"
