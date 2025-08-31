@@ -57,53 +57,86 @@
 
 
 app.post("/rentals", async (req, res) => {
-  try {
-    const { userId, rentalTime } = req.body;
-    if (!userId || !rentalTime) {
-      return res.status(400).json({ message: "userId & rentalTime required" });
-    }
+  const { userId, rentalTime } = req.body;
+  if (!userId || !rentalTime) return res.status(400).json({ message: "Missing params" });
 
-    // 1. Tạo record "pending"
-    const now = new Date();
-    const expiresAt = toSqlDateTime(addMinutes(now, rentalTime));
-
-    const rentalId = await new Promise((resolve, reject) => {
-      db.run(
-        `INSERT INTO rentals (userId, rentalTime, status, expiresAt) VALUES (?, ?, 'pending', ?)`,
-        [userId, rentalTime, expiresAt],
-        function (err) {
-          if (err) return reject(err);
-          resolve(this.lastID);
-        }
-      );
-    });
-
-    // 2. Gọi Python API (gửi rentalId để Python tự PATCH ngược về)
-axios.post("http://127.0.0.1:5001/command", {
-  action: "create_room",
-  userId,
-  rentalTime,
-  rentalId, // 👈 gửi sang cho Python
-}).then(res => {
-  console.log("✅ Đã gọi Python, status:", res.status);
-}).catch(err => {
-  console.error("❌ Lỗi gọi Python:", err.message);
-});
-
-
-    // 3. Trả về ngay record pending cho FE
-    db.get(`SELECT * FROM rentals WHERE id=?`, [rentalId], (err, row) => {
+  // Kiểm tra rental gần nhất của user
+  db.get(
+    `SELECT * FROM rentals WHERE userId=? ORDER BY id DESC LIMIT 1`,
+    [userId],
+    async (err, lastRental) => {
       if (err) return res.status(500).json({ message: "DB error" });
-      res.json({
-        message: "Rental created (pending, sẽ được active sau khi tool tạo room)",
-        rental: row,
-      });
-    });
-  } catch (err) {
-    console.error("Error:", err);
-    res.status(500).json({ error: "Failed to create rental" });
-  }
+
+      // Nếu chưa có rental nào => tạo mới room
+      if (!lastRental) {
+        // Gọi tool tạo room
+        axios.post("http://127.0.0.1:5001/command", {
+          action: "create_room",
+          userId,
+          rentalTime,
+          rentalId: null, // sẽ patch sau khi tạo DB
+          extra: null
+        }).then(r => console.log("✅ Đã gọi Python tạo room"))
+          .catch(e => console.error("❌ Create room tool error:", e.message));
+
+        // Tạo bản ghi mới
+        const expiresAt = toSqlDateTime(addMinutes(new Date(), rentalTime));
+        db.run(
+          `INSERT INTO rentals (userId, rentalTime, status) VALUES (?, ?, 'pending')`,
+          [userId, rentalTime],
+          function (err) {
+            if (err) return res.status(500).json({ message: "DB insert error" });
+            const rentalId = this.lastID;
+
+            // Gọi lại Python để patch rentalId vừa tạo
+            axios.post("http://127.0.0.1:5001/command", {
+              action: "create_room",
+              userId,
+              rentalTime,
+              rentalId,
+              extra: null
+            });
+
+            db.get(`SELECT * FROM rentals WHERE id=?`, [rentalId], (err, row) => {
+              if (err) return res.status(500).json({ message: "DB error" });
+              res.json({ message: "Tạo room mới", rental: row });
+            });
+          }
+        );
+
+      } else {
+        // Extend: tạo bản ghi mới với roomCode từ rental gần nhất
+        const roomCode = lastRental.roomCode;
+
+        const expiresAt = toSqlDateTime(addMinutes(new Date(), rentalTime));
+        db.run(
+          `INSERT INTO rentals (userId, rentalTime, status, roomCode, expiresAt) VALUES (?, ?, 'pending', ?, ?)`,
+          [userId, rentalTime, roomCode, expiresAt],
+          function (err) {
+            if (err) return res.status(500).json({ message: "DB insert error" });
+            const newRentalId = this.lastID;
+
+            // Gọi Python tool extend
+            axios.post("http://127.0.0.1:5001/command", {
+              action: "extend_room",
+              userId,
+              rentalId: newRentalId,
+              extra: roomCode
+            }).then(r => console.log("✅ Đã gọi Python extend"))
+              .catch(e => console.error("❌ Extend tool error:", e.message));
+
+            db.get(`SELECT * FROM rentals WHERE id=?`, [newRentalId], (err, row) => {
+              if (err) return res.status(500).json({ message: "DB error" });
+              res.json({ message: "Tạo bản ghi mới (extend)", rental: row });
+            });
+          }
+        );
+      }
+    }
+  );
 });
+
+
 
 
 
@@ -205,7 +238,9 @@ axios.post("http://127.0.0.1:5001/command", {
         });
         });
 
-        app.patch("/rentals/:id", (req, res) => {
+app.patch("/rentals/:id", (req, res) => {
+  console.log("PATCH body:", req.body);   // 👈 thêm ở đây để debug
+
   const { roomCode, status } = req.body;
   const { id } = req.params;
 
@@ -221,6 +256,7 @@ axios.post("http://127.0.0.1:5001/command", {
     }
   );
 });
+
 
 
         // ====== Background auto-expire (mỗi 60s) ======
