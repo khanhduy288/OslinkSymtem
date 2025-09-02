@@ -1,17 +1,25 @@
 from pynput import mouse, keyboard
+import pygetwindow as gw
 
 print("👉 Hướng dẫn:")
 print(" - Giữ SHIFT + click chuột trái lần 1: chọn góc trên trái")
 print(" - Giữ SHIFT + click chuột trái lần 2: chọn góc dưới phải")
-print(" - Sau đó sẽ in ra region và tự thoát")
+print(" - Sau đó sẽ in ra region (absolute & relative) và tự thoát")
 
 region = {}
 shift_pressed = False
 click_count = 0
 
-# Biến lưu listener để stop sau khi xong
 mouse_listener = None
 keyboard_listener = None
+
+# --------- HÀM LẤY CỬA SỔ LDPLAYER ---------
+def get_ldplayer_window(title="LDPlayer"):
+    wins = gw.getWindowsWithTitle(title)
+    if not wins:
+        print("[ERROR] Không tìm thấy LDPlayer")
+        return None
+    return wins[0]
 
 def on_press(key):
     global shift_pressed
@@ -36,14 +44,24 @@ def on_click(x, y, button, pressed):
         region['x2'], region['y2'] = x, y
         print(f"📍 Góc dưới phải: ({x}, {y})")
 
-        # Tính toán region
+        # Tính toán absolute region
         x1, y1 = region['x1'], region['y1']
         x2, y2 = region['x2'], region['y2']
         x, y = min(x1, x2), min(y1, y2)
         w, h = abs(x2 - x1), abs(y2 - y1)
-        print(f"✅ Region = ({x}, {y}, {w}, {h})")
 
-        # Stop cả 2 listener => chương trình sẽ tự thoát
+        print(f"✅ Absolute Region = ({x}, {y}, {w}, {h})")
+
+        # Lấy relative region theo LDPlayer
+        win = get_ldplayer_window()
+        if win:
+            rel_x = (x - win.left) / win.width
+            rel_y = (y - win.top) / win.height
+            rel_w = w / win.width
+            rel_h = h / win.height
+            print(f"🌐 Relative Region = [{rel_x:.3f}, {rel_y:.3f}, {rel_w:.3f}, {rel_h:.3f}] (so với {win.title})")
+
+        # Stop listener
         mouse_listener.stop()
         keyboard_listener.stop()
 

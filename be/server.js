@@ -58,7 +58,8 @@
 
 app.post("/rentals", async (req, res) => {
   const { userId, rentalTime } = req.body;
-  if (!userId || !rentalTime) return res.status(400).json({ message: "Missing params" });
+  if (!userId || !rentalTime)
+    return res.status(400).json({ message: "Missing params" });
 
   // Kiểm tra rental gần nhất của user
   db.get(
@@ -67,36 +68,29 @@ app.post("/rentals", async (req, res) => {
     async (err, lastRental) => {
       if (err) return res.status(500).json({ message: "DB error" });
 
-      // Nếu chưa có rental nào => tạo mới room
-      if (!lastRental) {
-        // Gọi tool tạo room
-        axios.post("http://127.0.0.1:5001/command", {
-          action: "create_room",
-          userId,
-          rentalTime,
-          rentalId: null, // sẽ patch sau khi tạo DB
-          extra: null
-        }).then(r => console.log("✅ Đã gọi Python tạo room"))
-          .catch(e => console.error("❌ Create room tool error:", e.message));
+      const expiresAt = toSqlDateTime(addMinutes(new Date(), rentalTime));
 
-        // Tạo bản ghi mới
-        const expiresAt = toSqlDateTime(addMinutes(new Date(), rentalTime));
+      if (!lastRental) {
+        // Tạo bản ghi mới trước
         db.run(
-          `INSERT INTO rentals (userId, rentalTime, status) VALUES (?, ?, 'pending')`,
-          [userId, rentalTime],
+          `INSERT INTO rentals (userId, rentalTime, status, expiresAt) VALUES (?, ?, 'pending', ?)`,
+          [userId, rentalTime, expiresAt],
           function (err) {
             if (err) return res.status(500).json({ message: "DB insert error" });
             const rentalId = this.lastID;
 
-            // Gọi lại Python để patch rentalId vừa tạo
+            // Gọi Python tool 1 lần duy nhất sau khi có rentalId
             axios.post("http://127.0.0.1:5001/command", {
               action: "create_room",
               userId,
               rentalTime,
               rentalId,
               extra: null
-            });
+            })
+            .then(() => console.log("✅ Python create_room đã chạy"))
+            .catch(e => console.error("❌ Create room tool error:", e.message));
 
+            // Trả về bản ghi vừa tạo
             db.get(`SELECT * FROM rentals WHERE id=?`, [rentalId], (err, row) => {
               if (err) return res.status(500).json({ message: "DB error" });
               res.json({ message: "Tạo room mới", rental: row });
@@ -108,7 +102,6 @@ app.post("/rentals", async (req, res) => {
         // Extend: tạo bản ghi mới với roomCode từ rental gần nhất
         const roomCode = lastRental.roomCode;
 
-        const expiresAt = toSqlDateTime(addMinutes(new Date(), rentalTime));
         db.run(
           `INSERT INTO rentals (userId, rentalTime, status, roomCode, expiresAt) VALUES (?, ?, 'pending', ?, ?)`,
           [userId, rentalTime, roomCode, expiresAt],
@@ -122,9 +115,11 @@ app.post("/rentals", async (req, res) => {
               userId,
               rentalId: newRentalId,
               extra: roomCode
-            }).then(r => console.log("✅ Đã gọi Python extend"))
-              .catch(e => console.error("❌ Extend tool error:", e.message));
+            })
+            .then(() => console.log("✅ Python extend_room đã chạy"))
+            .catch(e => console.error("❌ Extend tool error:", e.message));
 
+            // Trả về bản ghi vừa tạo
             db.get(`SELECT * FROM rentals WHERE id=?`, [newRentalId], (err, row) => {
               if (err) return res.status(500).json({ message: "DB error" });
               res.json({ message: "Tạo bản ghi mới (extend)", rental: row });
@@ -137,12 +132,6 @@ app.post("/rentals", async (req, res) => {
 });
 
 
-
-
-
-        /**
-         * Danh sách thuê
-         */
         app.get("/rentals", (req, res) => {
         db.all(
             `SELECT * FROM rentals ORDER BY createdAt DESC`,
