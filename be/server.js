@@ -132,16 +132,17 @@ app.post("/rentals", async (req, res) => {
 });
 
 
-        app.get("/rentals", (req, res) => {
-        db.all(
-            `SELECT * FROM rentals ORDER BY createdAt DESC`,
-            [],
-            (err, rows) => {
-            if (err) return res.status(500).json({ message: "DB error" });
-            res.json(rows);
-            }
-        );
-        });
+app.get("/rentals", (req, res) => {
+  db.all(
+    "SELECT id, userId, rentalTime, createdAt, roomCode, status FROM rentals ORDER BY datetime(createdAt) DESC",
+    [],
+    (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json(rows);
+    }
+  );
+});
+
 
         /**
          * Chi tiết 1 rental

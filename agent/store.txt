@@ -1,0 +1,8 @@
+  { "type": "wait", "seconds": 3 },
+  { "type": "click", "image": "images/cungchoi.png" },
+  { "type": "wait", "seconds": 3 },
+  { "type": "click", "image": "images/searchroom.png" },
+  { "type": "wait", "seconds": 3 },
+  { "type": "type", "text_mode": "second_token" },
+  { "type": "wait", "seconds": 3 },  
+  { "type": "click_window", "window": "LDPlayer", "rel_x": 0.178, "rel_y": 0.297 },
