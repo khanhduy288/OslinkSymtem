@@ -7,5 +7,6 @@
   { "type": "click_window", "window": "LDPlayer", "rel_x": 0.501, "rel_y": 0.764 },
   { "type": "wait", "seconds": 3 },
   { "type": "click_window", "window": "LDPlayer", "rel_x": 0.025, "rel_y": 0.106 },
-  { "type": "wait", "seconds": 3 }
+  { "type": "wait", "seconds": 3 },
+  { "type": "close_app", "image": "images/closeapp.png" }
 ]

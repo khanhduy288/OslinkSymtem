@@ -12,7 +12,7 @@
   { "type": "wait", "seconds": 2 },
   { "type": "ocr_server_name", "window": "LDPlayer", "region_ratio": [0.033, 0.077, 0.144, 0.066] },
   { "type": "wait", "seconds": 3 },
-  { "type": "click", "image": "images/copyld.png" },
+  { "type": "click", "image": "images/setting.png" },
   { "type": "wait", "seconds": 3 },
   { "type": "click", "image": "images/confirmcopyld.png" },
   { "type": "wait", "seconds": 9 },

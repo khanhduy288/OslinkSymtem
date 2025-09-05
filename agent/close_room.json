@@ -10,5 +10,11 @@
   { "type": "wait", "seconds": 3 },
   { "type":"click_server","window":"LDPlayer","region_ratio":[0.009,0.095,0.222,0.401]},
   { "type": "wait", "seconds": 3 },
-  { "type":"off_devide","window":"LDPlayer","off_icon":"images/setting.png","region":[0.005, 0.163, 0.963, 0.752]}
+  { "type":"off_devide","window":"LDPlayer","off_icon":"images/setting.png","region":[0.005, 0.163, 0.963, 0.752]},
+  { "type": "wait", "seconds": 2 },
+  { "type": "click", "image": "images/deleteld.png" },
+  { "type": "wait", "seconds": 2 },
+  { "type": "click", "image": "images/confirmdelete.png" },
+  { "type": "wait", "seconds": 2 },
+  { "type": "close_app", "image": "images/closeapp.png" }
 ]

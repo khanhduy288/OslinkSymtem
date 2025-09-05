@@ -1,2 +1,2 @@
 curl -X POST http://127.0.0.1:5001/command -H "Content-Type: application/json" -d "{\"action\":\"create_room\",\"userId\":\"user123\",\"rentalTime\":1,\"rentalId\":\"abc123\"}"
-curl -X POST http://localhost:5001/command -H "Content-Type: application/json" -d "{\"action\":\"close_room\",\"userId\":\"user123\",\"rentalId\":1,\"roomCode\":\"B khach10 B-6 fj27ddbyt5cknhxma\"}"
+curl -X POST http://localhost:5001/command -H "Content-Type: application/json" -d "{\"action\":\"close_room\",\"userId\":\"user123\",\"rentalId\":1,\"roomCode\":\"A khach10 A-3 fj27ddbyt5cknhxma\"}"

@@ -413,13 +413,20 @@ def run_action(action, room_name=None, **kwargs):
 
     elif action_type == "click":
         image_path = action.get("image")
+        threshold = float(action.get("threshold", 0.75))
+
         if image_path:
-            center, score = find_image_opencv(image_path, threshold=float(action.get("threshold", 0.75)))
-            if center:
+            # Tìm tất cả vị trí khớp thay vì chỉ 1
+            matches = find_all_images(image_path, threshold=threshold)
+
+            if matches:
+                # Sắp xếp theo y trước, rồi x (ưu tiên trên–trái)
+                matches.sort(key=lambda p: (p[1], p[0]))
+                center = matches[0]
                 pyautogui.click(center)
-                print(f"[INFO] Clicked {image_path} tại {center} (score={score:.2f})")
+                print(f"[INFO] Clicked (top-left) {image_path} tại {center}")
             else:
-                print(f"[WARN] Không tìm thấy {image_path} bằng OpenCV")
+                print(f"[WARN] Không tìm thấy {image_path} bằng OpenCV (threshold={threshold})")
         else:
             x, y = action.get("x"), action.get("y")
             if x is not None and y is not None:
@@ -428,6 +435,7 @@ def run_action(action, room_name=None, **kwargs):
             else:
                 print("[WARN] Không có 'image' hoặc (x, y) hợp lệ.")
         return None
+
 
     elif action_type == "click_bottom_icon":
         image_path = action.get("image")
@@ -533,8 +541,9 @@ def run_action(action, room_name=None, **kwargs):
     elif action_type == "off_devide":
         window = action.get("window", "LDPlayer")
         off_icon = action.get("off_icon", "images/setting.png")  # icon cần click
-        region_ratio = action.get("region", [0, 0, 1, 1])  # vùng tổng để tìm icon
-        scroll_amount = action.get("scroll_amount", 100)  # pixels để scroll mỗi lần
+        region_ratio = action.get("region", [0, 0, 1, 1])        # vùng tổng để tìm icon
+        scroll_amount = action.get("scroll_amount", 100)         # pixels scroll mỗi lần
+        max_scrolls = 1                                        # số lần scroll tối đa
 
         # Lấy target_text từ room_name
         target_text = None
@@ -558,9 +567,8 @@ def run_action(action, room_name=None, **kwargs):
         h = int(rect_full[3] * region_ratio[3])
         rect = (x0, y0, w, h)
 
-        max_scrolls = 10  # số lần scroll tối đa
-        scroll_count = 0
         clicked = False
+        scroll_count = 0
 
         while scroll_count <= max_scrolls and not clicked:
             # Screenshot toàn vùng
@@ -569,25 +577,39 @@ def run_action(action, room_name=None, **kwargs):
 
             # Tìm tất cả vị trí icon
             icon_positions = find_all_images(off_icon, region=rect)
-            print(f"[INFO] Tìm thấy {len(icon_positions)} icon '{off_icon}'")
+            print(f"[INFO] Tìm thấy {len(icon_positions)} icon '{off_icon}' (scroll lần {scroll_count})")
 
-            for cx, cy in icon_positions:
+            for idx, (cx, cy) in enumerate(icon_positions):
                 # Lấy kích thước icon
                 icon_w, icon_h = 50, 50  # thay bằng kích thước thực tế icon nếu biết
 
-                margin = 10  # khoảng rộng/thấp thêm 10px
-                x1 = cx - rect[0] + icon_w - margin
-                y1 = cy - rect[1] - margin - 5
-                x2 = x1 + 40 + 2*margin
-                y2 = y1 + icon_h + 2*margin
+                # Crop vùng OCR: bên phải icon
+                margin_x = 8   # nhỏ hơn để không thừa ngang
+                margin_y = 5   # cắt gọn trên dưới
+                x1 = cx - rect[0] + icon_w - margin_x
+                y1 = cy - rect[1] - margin_y
+                x2 = x1 + 45 + 2*margin_x   # rộng vừa đủ chữ
+                y2 = y1 + 30 + 2*margin_y   # cao vừa đủ chữ
                 crop_img = screenshot_cv[y1:y2, x1:x2]
 
+                # Lưu ảnh crop gốc
+                cv2.imwrite(f"debug_crop_{target_text}_{scroll_count}_{idx}.png", crop_img)
+
                 # Resize + threshold để OCR đọc tốt hơn
-                scale = 2
+                scale = 3
                 crop_img = cv2.resize(crop_img, (0, 0), fx=scale, fy=scale)
                 gray = cv2.cvtColor(crop_img, cv2.COLOR_BGR2GRAY)
-                _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
+                # Threshold cho chữ trắng nền đen
+                _, thresh = cv2.threshold(
+                    gray, 0, 255,
+                    cv2.THRESH_BINARY + cv2.THRESH_OTSU
+                )
+
+                # Lưu ảnh đã threshold để debug
+                cv2.imwrite(f"debug_crop_thresh_{target_text}_{scroll_count}_{idx}.png", thresh)
+
+                # OCR
                 text = pytesseract.image_to_string(
                     thresh,
                     config='--psm 7 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-'
@@ -597,27 +619,31 @@ def run_action(action, room_name=None, **kwargs):
 
                 if text.upper() == target_text.upper():
                     # Tìm icon bên phải cùng hàng gần nhất
-                    candidates = [(ix, iy) for ix, iy in icon_positions if iy >= cy-10 and iy <= cy+10 and ix > cx]
+                    candidates = [
+                        (ix, iy) for ix, iy in icon_positions
+                        if iy >= cy-10 and iy <= cy+10 and ix > cx
+                    ]
                     if candidates:
                         right_icon = min(candidates, key=lambda p: p[0])
                         pyautogui.click(right_icon[0], right_icon[1])
-                        print(f"[INFO] Clicked icon '{off_icon}' RIGHT of '{target_text}' at {right_icon}")
+                        print(f"[INFO] Clicked icon '{off_icon}' RIGHT of '{target_text}' tại {right_icon}")
                         clicked = True
                         break
 
             if not clicked:
                 if scroll_count < max_scrolls:
-                    # Scroll xuống một lượng vừa đủ
-                    pyautogui.moveTo(rect[0]+rect[2]//2, rect[1]+rect[3]//2)
+                    # Scroll xuống
+                    pyautogui.moveTo(rect[0] + rect[2]//2, rect[1] + rect[3]//2)
                     pyautogui.scroll(-scroll_amount)
-                    print(f"[INFO] Scroll xuống {scroll_amount}px để quét tiếp")
+                    print(f"[INFO] Scroll xuống {scroll_amount}px (lần {scroll_count+1})")
                     scroll_count += 1
-                    time.sleep(0.5)  # chờ hình ảnh load lại
+                    time.sleep(0.5)  # chờ giao diện load
                 else:
                     print(f"[WARN] Không tìm thấy icon gần '{target_text}' sau {max_scrolls} lần scroll")
                     break
 
         return target_text
+
 
 
     elif action_type == "type":
