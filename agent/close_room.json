@@ -3,12 +3,10 @@
   { "type": "click", "image": "images/focustab.png" },
   { "type": "wait", "seconds": 2 },
   { "type": "click", "image": "images/logooslink.png" },
-  { "type": "wait", "seconds": 18 },
-  { "type": "click_window", "window": "LDPlayer", "rel_x": 0.489, "rel_y": 0.764 },
-  { "type": "wait", "seconds": 3 },
+  { "type": "wait", "seconds": 15 },
   { "type": "click_window", "window": "LDPlayer", "rel_x": 0.025, "rel_y": 0.106 },
   { "type": "wait", "seconds": 3 },
-  { "type":"click_server","window":"LDPlayer","region_ratio":[0.009,0.095,0.222,0.401]},
+  { "type":"click_server","window":"LDPlayer","region_ratio":[0.007, 0.075, 0.105, 0.674]},
   { "type": "wait", "seconds": 3 },
   { "type":"off_devide","window":"LDPlayer","off_icon":"images/setting.png","region":[0.005, 0.163, 0.963, 0.752]},
   { "type": "wait", "seconds": 2 },
@@ -16,5 +14,5 @@
   { "type": "wait", "seconds": 2 },
   { "type": "click", "image": "images/confirmdelete.png" },
   { "type": "wait", "seconds": 2 },
-  { "type": "close_app", "image": "images/closeapp.png" }
+  { "type": "close_app", "image": "images/closeapp1.png" }
 ]

@@ -799,7 +799,7 @@ def run_action(action, room_name=None, **kwargs):
         off_icon = action.get("off_icon", "images/setting.png")  # icon cần click
         region_ratio = action.get("region", [0, 0, 1, 1])        # vùng tổng để tìm icon
         scroll_amount = action.get("scroll_amount", 100)         # pixels scroll mỗi lần
-        max_scrolls = 1                                        # số lần scroll tối đa
+        max_scrolls = 3                                          # số lần scroll tối đa
 
         # Lấy target_text từ room_name
         target_text = None
@@ -836,33 +836,43 @@ def run_action(action, room_name=None, **kwargs):
             print(f"[INFO] Tìm thấy {len(icon_positions)} icon '{off_icon}' (scroll lần {scroll_count})")
 
             for idx, (cx, cy) in enumerate(icon_positions):
-                # Lấy kích thước icon
-                icon_w, icon_h = 50, 50  # thay bằng kích thước thực tế icon nếu biết
+                # Giả định kích thước icon
+                icon_w, icon_h = 50, 50  
 
-                # Crop vùng OCR: bên phải icon
-                margin_x = 8   # nhỏ hơn để không thừa ngang
-                margin_y = 5   # cắt gọn trên dưới
-                x1 = cx - rect[0] + icon_w - margin_x
-                y1 = cy - rect[1] - margin_y
-                x2 = x1 + 45 + 2*margin_x   # rộng vừa đủ chữ
-                y2 = y1 + 30 + 2*margin_y   # cao vừa đủ chữ
+                # --- Cắt OCR bên trái icon ---
+                offset_left = 489   # mở rộng sang trái nhiều hơn
+                offset_right = 20   # dư thêm chút bên phải icon
+                offset_top = 30     # sát phía trên
+                offset_bottom = -30   # không cắt xuống dưới
+
+                x1 = cx - rect[0] - offset_left
+                y1 = cy - rect[1] - offset_top
+                x2 = cx - rect[0] + offset_right
+                y2 = cy - rect[1] + icon_h + offset_bottom
+
+                # đảm bảo không vượt ngoài ảnh
+                x1 = max(0, x1)
+                y1 = max(0, y1)
+                x2 = min(screenshot_cv.shape[1], x2)
+                y2 = min(screenshot_cv.shape[0], y2)
+
+                # crop vùng OCR
                 crop_img = screenshot_cv[y1:y2, x1:x2]
 
-                # Lưu ảnh crop gốc
+                # debug: vẽ khung xanh để check
+                debug_img = screenshot_cv.copy()
+                cv2.rectangle(debug_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.imwrite(f"debug_box_{target_text}_{scroll_count}_{idx}.png", debug_img)
                 cv2.imwrite(f"debug_crop_{target_text}_{scroll_count}_{idx}.png", crop_img)
 
-                # Resize + threshold để OCR đọc tốt hơn
+                # Resize + threshold
                 scale = 3
                 crop_img = cv2.resize(crop_img, (0, 0), fx=scale, fy=scale)
                 gray = cv2.cvtColor(crop_img, cv2.COLOR_BGR2GRAY)
-
-                # Threshold cho chữ trắng nền đen
                 _, thresh = cv2.threshold(
                     gray, 0, 255,
                     cv2.THRESH_BINARY + cv2.THRESH_OTSU
                 )
-
-                # Lưu ảnh đã threshold để debug
                 cv2.imwrite(f"debug_crop_thresh_{target_text}_{scroll_count}_{idx}.png", thresh)
 
                 # OCR
@@ -870,30 +880,26 @@ def run_action(action, room_name=None, **kwargs):
                     thresh,
                     config='--psm 7 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-'
                 ).strip()
-
                 print(f"[DEBUG] OCR read: '{text}'")
 
-                if text.upper() == target_text.upper():
-                    # Tìm icon bên phải cùng hàng gần nhất
-                    candidates = [
-                        (ix, iy) for ix, iy in icon_positions
-                        if iy >= cy-10 and iy <= cy+10 and ix > cx
-                    ]
-                    if candidates:
-                        right_icon = min(candidates, key=lambda p: p[0])
-                        pyautogui.click(right_icon[0], right_icon[1])
-                        print(f"[INFO] Clicked icon '{off_icon}' RIGHT of '{target_text}' tại {right_icon}")
-                        clicked = True
-                        break
+                # So khớp fuzzy
+                from fuzzywuzzy import fuzz
+                score = fuzz.ratio(text.upper(), target_text.upper())
+                print(f"[DEBUG] Fuzzy match: {score} với target '{target_text}'")
+
+                if score >= 70:
+                    pyautogui.click(cx, cy)
+                    print(f"[INFO] Clicked icon '{off_icon}' tại ({cx}, {cy}) cho device '{target_text}'")
+                    clicked = True
+                    break
 
             if not clicked:
                 if scroll_count < max_scrolls:
-                    # Scroll xuống
                     pyautogui.moveTo(rect[0] + rect[2]//2, rect[1] + rect[3]//2)
                     pyautogui.scroll(-scroll_amount)
                     print(f"[INFO] Scroll xuống {scroll_amount}px (lần {scroll_count+1})")
                     scroll_count += 1
-                    time.sleep(0.5)  # chờ giao diện load
+                    time.sleep(0.5)
                 else:
                     print(f"[WARN] Không tìm thấy icon gần '{target_text}' sau {max_scrolls} lần scroll")
                     break
