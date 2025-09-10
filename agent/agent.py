@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from fuzzywuzzy import fuzz
 import pyautogui
 import pyperclip
 import time
@@ -13,6 +14,7 @@ import pygetwindow as gw
 from PIL import Image
 import cv2
 import queue
+import keyboard
 import numpy as np
 
 # ============== App & Config ==============
@@ -69,6 +71,27 @@ def get_latest_roomcode(userId):
             return data[0].get("roomCode")
     return None
 
+def click_image_in_region(image_path, threshold=0.75, window=None, region_ratio=None):
+    region = None
+    if window and region_ratio:
+        wins = gw.getWindowsWithTitle(window)
+        if wins:
+            win = wins[0]
+            wx, wy, ww, wh = win.left, win.top, win.width, win.height
+            rx = int(wx + ww * region_ratio[0])
+            ry = int(wy + wh * region_ratio[1])
+            rw = int(ww * region_ratio[2])
+            rh = int(wh * region_ratio[3])
+            region = (rx, ry, rw, rh)
+
+    center, score = find_image_opencv(image_path, threshold=threshold, region=region)
+    if center:
+        pyautogui.click(center)
+        print(f"[INFO] Clicked {image_path} tại {center} (score={score:.2f}, region={region})")
+        return True
+    else:
+        print(f"[WARN] Không tìm thấy {image_path} trong region={region}, best_score={score:.2f}")
+        return False
 # Hàm parse bên ngoài
 def parse_room_code(room_code):
     parts = room_code.split()
@@ -299,26 +322,20 @@ def run_action(action, room_name=None, **kwargs):
         if not room_name or not region_ratio:
             print("[ERROR] Thiếu params cho click_server")
             return
-
         # Tách server và room_name
         server_letter = room_name[0]
         room_name = room_name.split()[1] if len(room_name.split()) > 1 else ""
-
         # Lấy rect cửa sổ
         win_rect = window_rect_abs(window_title)
         if not win_rect:
             print(f"[ERROR] Không lấy được rect cho window '{window_title}'")
             return
-
         # Chuyển region_ratio thành tọa độ tuyệt đối
         x, y, w, h = ratio_region_to_abs(win_rect, region_ratio)
-
         # Chụp ảnh vùng này
-        screenshot = pyautogui.screenshot(region=(x, y, w, h))
-        
+        screenshot = pyautogui.screenshot(region=(x, y, w, h)) 
         # Tìm vị trí server_letter trong ảnh
         coords = find_text_in_image(screenshot, server_letter)
-
         if coords:
             abs_x = x + coords[0]
             abs_y = y + coords[1]
@@ -331,7 +348,17 @@ def run_action(action, room_name=None, **kwargs):
         else:
             print(f"[WARN] Không tìm thấy server {server_letter}")
 
+    elif action_type == "click_region":
+        image_path = action.get("image")
+        threshold = float(action.get("threshold", 0.75))
+        window = action.get("window", None)
+        region_ratio = action.get("region_ratio", None)
 
+        if image_path:
+            click_image_in_region(image_path, threshold=threshold, window=window, region_ratio=region_ratio)
+        else:
+            print("[WARN] 'click_region' cần 'image'")
+        return None
 
     elif action_type == "click_image_in_window":
         window = action.get("window", "LDPlayer")
@@ -500,6 +527,235 @@ def run_action(action, room_name=None, **kwargs):
         else:
             print(f"[WARN] Không tìm thấy icon {image_path} trong vùng {region}")
         return None
+
+
+    elif action_type == "click_device_by_name":
+        window_title = action.get("window", "LDPlayer")
+        region_ratio = action.get("region_ratio", [0, 0, 1, 1])
+
+        # Lấy device target từ clipboard
+        target_device = pyperclip.paste().strip().upper()
+        if not target_device or not re.match(r"^[A-Z]-\d{1,2}$", target_device):
+            print(f"[ERROR] Clipboard không có device hợp lệ: '{target_device}'")
+            return None
+
+        # Chuẩn hóa input: thêm số 0 phía trước nếu chỉ có 1 chữ số
+        m = re.match(r"([A-Z])-(\d{1,2})", target_device)
+        if m:
+            prefix = m.group(1)
+            suffix = m.group(2).zfill(2)
+            target_device = f"{prefix}-{suffix}"
+
+        win = get_window_by_title(window_title)
+        if not win:
+            print(f"[ERROR] Không tìm thấy cửa sổ: {window_title}")
+            return None
+
+        abs_region = (
+            int(win.left + region_ratio[0] * win.width),
+            int(win.top + region_ratio[1] * win.height),
+            int(region_ratio[2] * win.width),
+            int(region_ratio[3] * win.height)
+        )
+
+        MAX_SCROLL = 90
+        IMG_SCALE = 2
+        Y_CLICK_OFFSET = 8
+
+        found_and_clicked = False
+
+        for scroll_round in range(MAX_SCROLL):
+            print(f"[DEBUG] ===== Scroll round {scroll_round} =====")
+
+            # Screenshot toàn region
+            screenshot = pyautogui.screenshot(region=abs_region)
+            gray = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2GRAY)
+            _, bin_img = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
+
+            # Resize để OCR dễ đọc
+            img = cv2.resize(bin_img, (bin_img.shape[1] * IMG_SCALE, bin_img.shape[0] * IMG_SCALE),
+                            interpolation=cv2.INTER_LINEAR)
+
+            text_data = pytesseract.image_to_data(
+                img,
+                output_type=pytesseract.Output.DICT,
+                config="--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
+            )
+
+            num_texts = len(text_data['text'])
+            print(f"[DEBUG] OCR phát hiện {num_texts} text box")
+
+            for i in range(num_texts):
+                raw_text = text_data['text'][i].strip().upper()
+                raw_text = re.sub(r'\s+', '', raw_text)
+
+                match = re.match(r'([A-Z])-?(\d{1,2})', raw_text)
+                if not match:
+                    continue
+
+                prefix = match.group(1)
+                suffix = match.group(2).zfill(2)
+                text = f"{prefix}-{suffix}"
+
+                print(f"[DEBUG] OCR chuẩn: '{text}' tại (scaled) ({text_data['left'][i]},{text_data['top'][i]},{text_data['width'][i]},{text_data['height'][i]})")
+
+                if text == target_device:
+                    print(f"[INFO] Match chính xác device '{text}' → '{target_device}', đợi màn hình đứng yên...")
+                    time.sleep(1.0)
+
+                    # OCR lại để lấy tọa độ chính xác
+                    screenshot2 = pyautogui.screenshot(region=abs_region)
+                    gray2 = cv2.cvtColor(np.array(screenshot2), cv2.COLOR_RGB2GRAY)
+                    _, bin2 = cv2.threshold(gray2, 150, 255, cv2.THRESH_BINARY)
+                    img2 = cv2.resize(bin2, (bin2.shape[1] * IMG_SCALE, bin2.shape[0] * IMG_SCALE),
+                                    interpolation=cv2.INTER_LINEAR)
+
+                    text_data2 = pytesseract.image_to_data(
+                        img2,
+                        output_type=pytesseract.Output.DICT,
+                        config="--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
+                    )
+
+                    for j in range(len(text_data2['text'])):
+                        raw2 = text_data2['text'][j].strip().upper()
+                        raw2 = re.sub(r'\s+', '', raw2)
+
+                        match2 = re.match(r'([A-Z])-?(\d{1,2})', raw2)
+                        if not match2:
+                            continue
+
+                        prefix2 = match2.group(1)
+                        suffix2 = match2.group(2).zfill(2)
+                        text2 = f"{prefix2}-{suffix2}"
+
+                        if text2 == target_device:
+                            x_scaled, y_scaled = text_data2['left'][j], text_data2['top'][j]
+                            w_scaled, h_scaled = text_data2['width'][j], text_data2['height'][j]
+
+                            center_x_orig = (x_scaled + w_scaled / 2.0) / IMG_SCALE
+                            center_y_orig = (y_scaled + h_scaled / 2.0) / IMG_SCALE
+
+                            click_x = abs_region[0] + int(center_x_orig)
+                            click_y = abs_region[1] + int(center_y_orig) + Y_CLICK_OFFSET
+
+                            try:
+                                win.activate()
+                            except Exception:
+                                pass
+                            time.sleep(0.05)
+
+                            pyautogui.moveTo(click_x, click_y, duration=0.12)
+                            pyautogui.click()
+                            print(f"[INFO] Click chính xác vào '{text2}' tại ({click_x},{click_y})")
+                            found_and_clicked = True
+                            break
+
+                    if found_and_clicked:
+                        break
+
+            if found_and_clicked:
+                break
+
+            # Scroll xuống nếu chưa tìm thấy
+            pyautogui.moveTo(win.centerx, win.centery)
+            pyautogui.scroll(-500)
+            time.sleep(0.3)
+
+        if not found_and_clicked:
+            print(f"[WARN] Không tìm thấy device '{target_device}'")
+            return None
+
+        return target_device
+
+
+    elif action_type == "get_idle_device_name":
+        window = action.get("window", "LDPlayer")
+        region_ratio = action.get("region", [0.327, 0.159, 0.643, 0.745])
+
+        rect = window_rect_abs(window)
+        if not rect:
+            print(f"[ERROR] Không tìm thấy cửa sổ '{window}'")
+            return None
+
+        device_name = None
+        scroll_attempts = 5  # số lần scroll thử nếu không tìm thấy icon
+        back_button_abs = (958, 553)
+        for attempt in range(scroll_attempts):
+            region_abs = ratio_region_to_abs(rect, region_ratio)
+
+            # 1. Tìm tất cả setting icon trong vùng
+            setting_icons = find_all_images("images/setting_icon.png", region=region_abs, threshold=0.88)
+            print(f"[DEBUG] Scroll attempt {attempt+1}/{scroll_attempts}, tìm thấy {len(setting_icons)} setting_icon")
+
+            if not setting_icons:
+                print("[WARN] Không tìm thấy setting_icon trong region, scroll xuống để tìm tiếp")
+                pyautogui.moveTo(region_abs[0]+region_abs[2]//2, region_abs[1]+region_abs[3]//2)
+                pyautogui.scroll(-region_abs[3]//2)  # scroll xuống nửa vùng
+                time.sleep(1)
+                continue
+
+            # nếu tìm thấy, xử lý từng icon
+            for idx, target in enumerate(setting_icons, 1):
+                print(f"[DEBUG] Xử lý setting_icon {idx}/{len(setting_icons)} tại {target}")
+                pyautogui.click(target)
+                time.sleep(1.5)
+
+                # check ngay trong region được truyền vào
+                center, score = find_image_opencv("images/off_icon.png", region=region_abs, threshold=0.9)
+                if center is not None:
+                    print(f"[INFO] Máy này đang bật (có nút tắt máy) → bỏ qua, off_icon tại {center}, score={score:.2f}")
+                    pyautogui.click(back_button_abs)
+                    time.sleep(1)
+                    continue  # bỏ qua icon này, thử cái khác
+                else:
+                    print(f"[DEBUG] Không thấy off_icon (score={score:.2f}) → máy idle, tiếp tục rename")
+
+                # nếu không có nút tắt máy → tức là máy idle
+                click_image_in_region("images/rename_button.png", window=window, region_ratio=region_ratio)
+                time.sleep(1)
+
+                textbox_x, textbox_y = 876, 522
+                pyautogui.mouseDown(x=textbox_x, y=textbox_y)
+                time.sleep(0.5)
+                pyautogui.mouseUp(x=textbox_x, y=textbox_y)
+                time.sleep(0.5)
+
+                # copy text
+                click_image_in_region("images/select_all.png", window=window, region_ratio=[0,0,1,1])
+                time.sleep(0.5)
+                click_image_in_region("images/saochep.png", window=window, region_ratio=[0,0,1,1])
+                time.sleep(0.5)
+
+                copied_text = pyperclip.paste().strip()
+                print(f"[DEBUG] Nội dung vừa copy: {copied_text}")
+
+                if any(char.isdigit() for char in copied_text):
+                    device_name = copied_text
+                    print(f"[INFO] Lấy được device_name: {device_name}")
+                    click_image_in_region("images/back_button.png", window=window, region_ratio=region_ratio)
+                    time.sleep(1)
+                    break
+                else:
+                    print("[WARN] Tên copy không hợp lệ, back lại và thử icon tiếp theo")
+                    click_image_in_region("images/back_button.png", window=window, region_ratio=region_ratio)
+                    time.sleep(1)
+
+            if device_name:
+                break  # thoát vòng scroll nếu đã lấy được name
+
+            # Scroll xuống để tìm icon mới
+            pyautogui.moveTo(region_abs[0]+region_abs[2]//2, region_abs[1]+region_abs[3]//2)
+            pyautogui.scroll(-region_abs[3]//2)
+            time.sleep(1)
+
+        if not device_name:
+            print("[WARN] Không tìm thấy device idle nào")
+            return None
+
+        return device_name
+
+
+
 
     elif action_type == "click_bottom_icon_only":
         image_path = action.get("image")
@@ -688,7 +944,7 @@ def run_action(action, room_name=None, **kwargs):
         except Exception as e:
             print(f"[ERROR] Không đọc được clipboard: {e}")
             return None
-
+        
     elif action_type == "ocr_copy":
         region = action.get("region")
         if region:
@@ -696,9 +952,8 @@ def run_action(action, room_name=None, **kwargs):
                 screenshot = pyautogui.screenshot(region=tuple(region))
                 text = pytesseract.image_to_string(screenshot, config="--psm 6").strip()
                 if text:
-                    pyperclip.copy(text)
-                    print(f"[INFO] OCR copied: {text}")
-                    return text
+                    print(f"[INFO] OCR result: {text}")
+                    return text   # chỉ return, không copy
                 else:
                     print("[WARN] OCR không nhận được text nào.")
             except Exception as e:
@@ -706,6 +961,7 @@ def run_action(action, room_name=None, **kwargs):
         else:
             print("[WARN] Thiếu region cho 'ocr_copy'")
         return None
+
 
     elif action_type == "click_min_number":
         if "window" in action and "region_ratio" in action:
@@ -777,9 +1033,22 @@ def run_action(action, room_name=None, **kwargs):
         return None
 
     elif action_type == "scroll_down_max":
-        pyautogui.scroll(-9999999)
-        print("[INFO] Scrolling down to max...")
+        window = action.get("window", "LDPlayer")
+        wins = gw.getWindowsWithTitle(window)
+        if wins:
+            win = wins[0]
+            win.activate()
+            time.sleep(0.3)
+
+            pyautogui.moveTo(win.centerx, win.centery)
+            time.sleep(0.2)
+
+            pyautogui.scroll(-999999)  
+            print("[INFO] Scrolled down to max (wheel, one shot).")
+        else:
+            print(f"[WARN] Không tìm thấy cửa sổ {window}")
         return None
+
 
     elif action_type == "scroll_up_max":
         pyautogui.scroll(9999999)
