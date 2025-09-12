@@ -752,7 +752,7 @@ def run_action(action, room_name=None, **kwargs):
             print("[WARN] Không tìm thấy device idle nào")
             return None
 
-        return device_name
+        return None
 
 
 
@@ -907,7 +907,6 @@ def run_action(action, room_name=None, **kwargs):
         return target_text
 
 
-
     elif action_type == "type":
         text_mode = action.get("text_mode", "full")  # mặc định gõ full room_name
         if room_name:
@@ -1037,7 +1036,7 @@ def run_action(action, room_name=None, **kwargs):
         else:
             print(f"[ERROR] Không tìm thấy nút X (ảnh: {image_path})")
         return None
-
+    
     elif action_type == "scroll_down_max":
         window = action.get("window", "LDPlayer")
         wins = gw.getWindowsWithTitle(window)
@@ -1046,11 +1045,13 @@ def run_action(action, room_name=None, **kwargs):
             win.activate()
             time.sleep(0.3)
 
-            pyautogui.moveTo(win.centerx, win.centery)
+            # ==== Tùy chỉnh tọa độ cố định (VD: x=800, y=500) ====
+            fixed_x, fixed_y = 939, 234  
+            pyautogui.moveTo(fixed_x, fixed_y)
             time.sleep(0.2)
 
-            pyautogui.scroll(-999999)  
-            print("[INFO] Scrolled down to max (wheel, one shot).")
+            pyautogui.scroll(-999999)
+            print(f"[INFO] Scrolled down to max tại ({fixed_x},{fixed_y}).")
         else:
             print(f"[WARN] Không tìm thấy cửa sổ {window}")
         return None
@@ -1068,13 +1069,16 @@ def run_action(action, room_name=None, **kwargs):
 def run_script(file_path=ACTIONS_FILE, room_name=None):
     actions = load_actions(file_path)
     parts = []
-    for action in actions:
-        print(f"[DEBUG] Chạy action: {action} với room_name={room_name}")
+    for idx, action in enumerate(actions, start=1):
+        print(f"[DEBUG] Chạy action {idx}/{len(actions)}: {action} với room_name={room_name}")
         result = run_action(action, room_name=room_name)
         # Chỉ thêm nếu result là chuỗi
         if isinstance(result, str) and result.strip():
             parts.append(result.strip())
-    return " ".join(parts) if parts else None
+
+    summary = " ".join(parts) if parts else None
+    print(f"[INFO] Hoàn thành script {file_path} ({len(actions)} actions) cho room {room_name}")
+    return summary
 
 
 # ============== Business Tools ==============
@@ -1115,12 +1119,78 @@ def run_extend_tool(roomCode: str):
         print(f"[ERROR] Extend room {roomCode} thất bại: {e}")
         return False
 
+def run_remove_group_tool(roomCode: str):
+    """
+    Remove toàn bộ group theo roomCode.
+    Trả True/False, KHÔNG dựa vào text trả về.
+    """
+    print(f"[TOOL] Remove group với roomCode={roomCode}")
+    try:
+        _ = run_script("remove_group.json", room_name=roomCode)
+        print(f"[INFO] Remove group {roomCode} thành công")
+        return True
+    except Exception as e:
+        print(f"[ERROR] Remove group {roomCode} thất bại: {e}")
+        return False
+
+
+def run_change_devide_tool(roomCode: str):
+    """
+    Đổi thiết bị trong room theo roomCode.
+    Trả True/False, KHÔNG dựa vào text trả về.
+    """
+    print(f"[TOOL] Change devide cho roomCode={roomCode}")
+    try:
+        _ = run_script("change_devide.json", room_name=roomCode)
+        print(f"[INFO] Change devide {roomCode} thành công")
+        return True
+    except Exception as e:
+        print(f"[ERROR] Change devide {roomCode} thất bại: {e}")
+        return False
+
+
 def schedule_room_close(userId, rentalTime):
     def task():
         time.sleep(float(rentalTime) * 60 * 60)
         print(f"[INFO] Hết hạn thuê room user {userId}")
         ROOMS.pop(userId, None)
     threading.Thread(target=task, daemon=True).start()
+
+def run_get_codenew_tool(room_code: str):
+    """
+    Lấy roomCode mới từ automation script và trả về roomCode đã cập nhật.
+    Ví dụ:
+      input:  "A khach1 F-1 ahjsdhaksd"
+      script return: "ajshdhkac"
+      output: "A khach1 F-1 ajshdhkac"
+    """
+    try:
+        print(f"[DEBUG] run_get_codenew_tool start với room_code={room_code}")
+
+        # chạy automation JSON để lấy code mới
+        new_code = run_script("get_codenew.json", room_name=room_code)
+
+        if not new_code:
+            print("[ERROR] Script không trả về code mới")
+            return None
+
+        # tách prefix (giữ nguyên tất cả trừ phần cuối)
+        parts = room_code.split(" ")
+        if len(parts) < 2:
+            print("[ERROR] room_code không đúng định dạng, không thể cập nhật")
+            return None
+
+        # thay thế phần cuối cùng = new_code
+        updated_code = " ".join(parts[:-1] + [new_code])
+
+        print(f"[INFO] run_get_codenew_tool → updated_code={updated_code}")
+        return updated_code
+
+    except Exception as e:
+        print(f"[ERROR] run_get_codenew_tool fail: {e}")
+        return None
+
+
 
 def update_close_room_json(room_code: str):
     server, room_name = parse_room_code(room_code)
@@ -1184,25 +1254,48 @@ def worker():
                 if res:
                     print(f"[INFO] POST rental mới, status={res.status_code}, resp={res.text}")
 
+            elif action == "get_codenew":
+                userId = userId or "unknown"
+                room_code = extra
+                print(f"[INFO] Worker get_codenew userId={userId}, rentalId={rentalId}, roomCode={room_code}")
+
+                updated_code = run_get_codenew_tool(room_code)
+                if updated_code:
+                    payload = {"roomCode": updated_code}
+                    print(f"[DEBUG] PATCH body gửi lên BE: {payload}")
+                    res = http_patch(f"{BACKEND_API}/rentals/{rentalId}", json=payload)
+                    if res:
+                        print(f"[INFO] PATCH rentalId={rentalId}, status={res.status_code}, resp={res.text}")
+                else:
+                    print("[ERROR] Không thể cập nhật roomCode mới")
+
+
             elif action == "close_room":
                 userId = userId or "unknown"
                 room_code = extra  # VD: "A khach73 fj27beba43re6ndw4"
                 print(f"[INFO] Worker close_room userId={userId}, rentalId={rentalId}, roomCode={room_code}")
 
                 try:
-                    # chạy kịch bản JSON, chỉ truyền room_code
                     run_script("close_room.json", room_name=room_code)
                     print(f"[INFO] Close room automation đã chạy cho room {room_code}")
                 except Exception as e:
                     print(f"[ERROR] Close room automation thất bại: {e}")
 
-                # Báo BE update status expired
                 payload = {"status": "expired"}
                 res = http_patch(f"{BACKEND_API}/rentals/{rentalId}", json=payload)
                 if res:
                     print(f"[INFO] PATCH rentalId={rentalId} -> expired OK")
 
+            # ================== ACTION MỚI ==================
+            elif action == "remove_group":
+                room_code = extra
+                print(f"[INFO] Worker remove_group roomCode={room_code}, userId={userId}")
+                run_script("remove_group.json", room_name=room_code)
 
+            elif action == "change_devide":
+                room_code = extra
+                print(f"[INFO] Worker change_devide roomCode={room_code}, userId={userId}")
+                run_script("change_devide.json", room_name=room_code)
 
             else:
                 print(f"[WARN] Unknown worker action: {action}")
@@ -1216,7 +1309,6 @@ def worker():
             except Exception:
                 pass
 
-            # tiếp tục vòng lặp
 
 # ============== Flask API ==============
 @app.route("/health", methods=["GET"])
@@ -1259,6 +1351,34 @@ def command():
         request_queue.put(("close_room", userId, None, rentalId, roomCode))
         return jsonify({"status": "queued"})
 
+    # ================== API MỚI ==================
+    elif action == "remove_group":
+        userId = data.get("userId")
+        roomCode = data.get("roomCode")
+        if not all([userId, roomCode]):
+            return jsonify({"error": "Missing params"}), 400
+
+        request_queue.put(("remove_group", userId, None, None, roomCode))
+        return jsonify({"status": "queued"})
+
+    elif action == "change_devide":
+        userId = data.get("userId")
+        roomCode = data.get("roomCode")
+        if not all([userId, roomCode]):
+            return jsonify({"error": "Missing params"}), 400
+
+        request_queue.put(("change_devide", userId, None, None, roomCode))
+        return jsonify({"status": "queued"})
+
+    elif action == "get_codenew":
+        userId = data.get("userId")
+        rentalId = data.get("rentalId")
+        roomCode = data.get("roomCode")
+        if not all([userId, rentalId, roomCode]):
+            return jsonify({"error": "Missing params"}), 400
+
+        request_queue.put(("get_codenew", userId, None, rentalId, roomCode))
+        return jsonify({"status": "queued"})
 
     else:
         return jsonify({"error": "Unknown action"}), 400

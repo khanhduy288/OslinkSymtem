@@ -1,0 +1,22 @@
+[
+  { "type": "wait", "seconds": 2 },
+  { "type": "click", "image": "images/focustab.png" },
+  { "type": "wait", "seconds": 2 },
+  { "type": "click", "image": "images/logooslink.png" },
+  { "type": "wait", "seconds": 15 },
+  { "type": "click", "image": "images/cungchoi.png" },
+  { "type": "wait", "seconds": 3 },
+  { "type": "click", "image": "images/searchroom.png" },
+  { "type": "wait", "seconds": 3 },
+  { "type": "type", "text_mode": "second_token" },
+  { "type": "wait", "seconds": 3 },
+  { "type": "click", "image": "images/menugr.png" },
+  { "type": "wait", "seconds": 2 },
+  { "type": "click", "image": "images/giaitanroom.png" },
+  { "type": "wait", "seconds": 2 },
+  { "type": "click", "image": "images/confirmdelete.png" },
+  { "type": "wait", "seconds": 2 },
+  { "type": "close_app", "image": "images/closeapp1.png" }
+]
+
+
