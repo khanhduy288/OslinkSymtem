@@ -28,7 +28,7 @@ ROOMS = {}  # userId -> {'room_code':..., 'end_time':...}
 JSON_PATH = "close_room.json"
 
 # --- ĐƯỜNG DẪN TESSERACT --- (ưu tiên ENV, fallback đường dẫn cứng)
-tesseract_path = os.getenv("TESSERACT_PATH", r"C:\project12m\OslinkSymtem\tessat\tesseract.exe")
+tesseract_path = os.getenv("TESSERACT_PATH", r"D:\project12m\OslinkSymtem\tessat\tesseract.exe")
 pytesseract.pytesseract.tesseract_cmd = tesseract_path
 
 # Global queue
@@ -665,7 +665,83 @@ def run_action(action, room_name=None, **kwargs):
             print(f"[WARN] Không tìm thấy device '{target_device}'")
             return None
 
-        return target_device
+        return tar
+        
+    elif action_type == "get_new_device_name":
+        window = action.get("window", "LDPlayer")
+        region_ratio = action.get("region", [0, 0, 1, 1])
+
+        # --- Lấy server prefix từ clipboard ---
+        try:
+            server_name = pyperclip.paste().strip()
+            if not server_name:
+                print("[ERROR] Clipboard trống, không lấy được server name")
+                return None
+            prefix = server_name.split("-")[0].upper()  # chỉ lấy phần chữ
+        except Exception as e:
+            print(f"[ERROR] Lỗi lấy server name từ clipboard: {e}")
+            return None
+
+        print(f"[INFO] Server prefix lấy từ clipboard: {prefix}")
+
+        # --- Lấy tọa độ tuyệt đối của region ---
+        rect_full = window_rect_abs(window)
+        if not rect_full:
+            print(f"[ERROR] Không tìm thấy window '{window}'")
+            return None
+        x0 = int(rect_full[0] + rect_full[2] * region_ratio[0])
+        y0 = int(rect_full[1] + rect_full[3] * region_ratio[1])
+        w = int(rect_full[2] * region_ratio[2])
+        h = int(rect_full[3] * region_ratio[3])
+        rect = (x0, y0, w, h)
+
+        # --- Quét toàn bộ danh sách bằng scroll ---
+        max_scrolls = 5
+        scroll_amount = 200
+        all_texts = set()
+
+        for scroll_count in range(max_scrolls + 1):
+            screenshot_full = pyautogui.screenshot(region=rect)
+            screenshot_cv = cv2.cvtColor(np.array(screenshot_full), cv2.COLOR_RGB2BGR)
+
+            # OCR toàn vùng
+            gray = cv2.cvtColor(screenshot_cv, cv2.COLOR_BGR2GRAY)
+            _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            text_all = pytesseract.image_to_string(
+                thresh,
+                config='--psm 6 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-'
+            )
+            lines = [t.strip() for t in text_all.splitlines() if t.strip()]
+            for line in lines:
+                if line.upper().startswith(prefix + "-"):
+                    all_texts.add(line.upper())
+
+            # Scroll xuống
+            pyautogui.moveTo(rect[0] + rect[2]//2, rect[1] + rect[3]//2)
+            pyautogui.scroll(-scroll_amount)
+            time.sleep(0.4)
+
+        print(f"[INFO] Danh sách thiết bị OCR được: {all_texts}")
+
+        # --- Xử lý tên mới ---
+        numbers = []
+        for name in all_texts:
+            try:
+                num = int(name.split("-")[1])
+                numbers.append(num)
+            except:
+                pass
+
+        if numbers:
+            new_number = max(numbers) + 1
+        else:
+            new_number = 1
+
+        new_device_name = f"{prefix}-{new_number}"
+        pyperclip.copy(new_device_name)
+        print(f"[INFO] Tên thiết bị mới: {new_device_name} (đã copy vào clipboard)")
+
+        return new_device_name
 
 
     elif action_type == "get_idle_device_name":
@@ -793,6 +869,118 @@ def run_action(action, room_name=None, **kwargs):
         except Exception as e:
             print(f"[ERROR] click_bottom_icon_only: {e}")
             return None
+
+    elif action_type == "get_new_device_name":
+        window = action.get("window", "LDPlayer")
+        off_icon = action.get("off_icon", "images/setting.png")  # icon cần scan
+        region_ratio = action.get("region", [0, 0, 1, 1])
+        scroll_amount = action.get("scroll_amount", 100)
+        max_scrolls = 3
+
+        # --- Lấy server prefix từ clipboard ---
+        try:
+            server_name = pyperclip.paste().strip()
+            if not server_name:
+                print("[ERROR] Clipboard trống, không lấy được server name")
+                return None
+            prefix = server_name.split("-")[0].upper()
+        except Exception as e:
+            print(f"[ERROR] Lỗi lấy server name từ clipboard: {e}")
+            return None
+        print(f"[INFO] Server prefix: {prefix}")
+
+        # --- Lấy tọa độ tuyệt đối của region ---
+        rect_full = window_rect_abs(window)
+        if not rect_full:
+            print(f"[ERROR] Không tìm thấy window '{window}'")
+            return None
+        x0 = int(rect_full[0] + rect_full[2] * region_ratio[0])
+        y0 = int(rect_full[1] + rect_full[3] * region_ratio[1])
+        w = int(rect_full[2] * region_ratio[2])
+        h = int(rect_full[3] * region_ratio[3])
+        rect = (x0, y0, w, h)
+
+        all_names = set()
+        scroll_count = 0
+        clicked = False  # chỉ dùng để scroll
+
+        while scroll_count <= max_scrolls:
+            # Screenshot toàn vùng
+            screenshot_full = pyautogui.screenshot(region=rect)
+            screenshot_cv = cv2.cvtColor(np.array(screenshot_full), cv2.COLOR_RGB2BGR)
+
+            # Tìm tất cả vị trí icon
+            icon_positions = find_all_images(off_icon, region=rect)
+            print(f"[INFO] Tìm thấy {len(icon_positions)} icon '{off_icon}' (scroll lần {scroll_count})")
+
+            for idx, (cx, cy) in enumerate(icon_positions):
+                icon_w, icon_h = 50, 50  
+
+                # --- Crop OCR bên trái icon ---
+                offset_left = 489
+                offset_right = 20
+                offset_top = 30
+                offset_bottom = -30
+
+                x1 = cx - rect[0] - offset_left
+                y1 = cy - rect[1] - offset_top
+                x2 = cx - rect[0] + offset_right
+                y2 = cy - rect[1] + icon_h + offset_bottom
+
+                # đảm bảo không vượt ngoài ảnh
+                x1 = max(0, x1)
+                y1 = max(0, y1)
+                x2 = min(screenshot_cv.shape[1], x2)
+                y2 = min(screenshot_cv.shape[0], y2)
+
+                crop_img = screenshot_cv[y1:y2, x1:x2]
+
+                # --- Debug lưu ảnh ---
+                debug_img = screenshot_cv.copy()
+                cv2.rectangle(debug_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.imwrite(f"debug_getnew_box_{scroll_count}_{idx}.png", debug_img)
+                cv2.imwrite(f"debug_getnew_crop_{scroll_count}_{idx}.png", crop_img)
+
+                # Resize + threshold
+                scale = 3
+                crop_img = cv2.resize(crop_img, (0, 0), fx=scale, fy=scale)
+                gray = cv2.cvtColor(crop_img, cv2.COLOR_BGR2GRAY)
+                _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                cv2.imwrite(f"debug_getnew_crop_thresh_{scroll_count}_{idx}.png", thresh)
+
+                # OCR
+                text = pytesseract.image_to_string(
+                    thresh,
+                    config='--psm 7 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-'
+                ).strip()
+                if text:
+                    all_names.add(text.upper())
+                    print(f"[DEBUG] OCR device: '{text}'")
+
+            # Scroll xuống
+            pyautogui.moveTo(rect[0] + rect[2] // 2, rect[1] + rect[3] // 2)
+            pyautogui.scroll(-scroll_amount)
+            scroll_count += 1
+            time.sleep(0.5)
+
+        print(f"[INFO] Danh sách thiết bị OCR được: {all_names}")
+
+        # --- Tính số mới ---
+        numbers = []
+        for name in all_names:
+            if name.startswith(prefix + "-"):
+                try:
+                    numbers.append(int(name.split("-")[1]))
+                except:
+                    pass
+
+        new_number = max(numbers) + 1 if numbers else 1
+        new_device_name = f"{prefix}-{new_number}"
+        pyperclip.copy(new_device_name)
+        print(f"[INFO] Tên thiết bị mới: {new_device_name} (đã copy vào clipboard)")
+
+        return new_device_name
+
 
     elif action_type == "off_devide":
         window = action.get("window", "LDPlayer")
