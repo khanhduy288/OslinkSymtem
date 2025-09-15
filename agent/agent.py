@@ -852,7 +852,7 @@ def run_action(action, room_name=None, **kwargs):
 
         for attempt in range(scroll_attempts):
             region_abs = ratio_region_to_abs(rect, region_ratio)
-            setting_icons = find_all_images("images/setting_icon.png", region=region_abs, threshold=0.88)
+            setting_icons = find_all_images("images/setting_icon.png", region=region_abs, threshold=0.6)
             print(f"[DEBUG] Scroll attempt {attempt+1}/{scroll_attempts}, tìm thấy {len(setting_icons)} setting_icon")
 
             if not setting_icons:
