@@ -954,9 +954,7 @@ def run_action(action, room_name=None, **kwargs):
         region_ratio = action.get("region", [0.002, 0.149, 0.972, 0.732])
 
         # Lấy room_name từ hàm gọi
-        room_name = room_name
         print(f"[DEBUG] Room name nhận được: '{room_name}'")
-
         parts = room_name.split()
         print(f"[DEBUG] parts của room_name: {parts}")
 
@@ -964,10 +962,8 @@ def run_action(action, room_name=None, **kwargs):
             print("[ERROR] Room name quá ngắn để lấy thiết bị")
             return None
 
-        # --- Lấy thiết bị cần xóa từ phần thứ 3 ---
+        # Lấy thiết bị cần xóa từ phần thứ 3
         device_to_delete_raw = parts[2].upper()
-
-        # Chuẩn hóa ngược: B-01 -> B-1
         if "-" in device_to_delete_raw:
             prefix, num = device_to_delete_raw.split("-")
             try:
@@ -989,7 +985,7 @@ def run_action(action, room_name=None, **kwargs):
 
         for attempt in range(scroll_attempts):
             region_abs = ratio_region_to_abs(rect, region_ratio)
-            setting_icons = find_all_images("images/setting2.png", region=region_abs, threshold=0.88)
+            setting_icons = find_all_images("images/setting2.png", region=region_abs, threshold=0.6)
             print(f"[DEBUG] Scroll attempt {attempt+1}/{scroll_attempts}, tìm thấy {len(setting_icons)} setting_icon")
 
             if not setting_icons:
@@ -1005,26 +1001,24 @@ def run_action(action, room_name=None, **kwargs):
                 pyautogui.click(target)
                 time.sleep(1.5)
 
-                # vào rename
+                # Vào rename
                 click_image_in_region("images/rename2.png", window=window, region_ratio=region_ratio)
                 time.sleep(1)
 
-                # giữ chuột textbox
+                # Giữ chuột textbox
                 textbox_x, textbox_y = 888, 529
                 pyautogui.mouseDown(x=textbox_x, y=textbox_y)
                 time.sleep(0.5)
                 pyautogui.mouseUp(x=textbox_x, y=textbox_y)
                 time.sleep(0.5)
 
-                # copy text
+                # Copy text
                 click_image_in_region("images/select_all1.png", window=window, region_ratio=[0,0,1,1])
                 time.sleep(0.9)
                 click_image_in_region("images/saochep1.png", window=window, region_ratio=[0,0,1,1])
                 time.sleep(0.9)
 
-
                 copied_text_raw = pyperclip.paste().strip().upper()
-                # Chuẩn hóa ngược
                 if "-" in copied_text_raw:
                     prefix, num = copied_text_raw.split("-")
                     try:
@@ -1037,35 +1031,56 @@ def run_action(action, room_name=None, **kwargs):
                 print(f"[DEBUG] Copy được: {copied_text}")
                 copied_names.add(copied_text)
 
-                # back ra ngay sau khi copy
+                # Back ra sau khi copy
                 click_image_in_region("images/back_button1.png", window=window, region_ratio=region_ratio)
                 time.sleep(1)
 
-                # Nếu tên thiết bị trùng thì click lại icon và xóa
+                # Nếu trùng thiết bị, kick room và thoát vòng lặp
                 if copied_text == device_to_delete:
-                    print(f"[INFO] Tìm thấy thiết bị cần xóa: {copied_text} -> click lại icon để xóa")
-                    pyautogui.click(target)  # click lại vào icon
+                    print(f"[INFO] Tìm thấy thiết bị cần xóa: {copied_text}")
+
+                    pyautogui.click(target)
                     time.sleep(1.5)
+
+                    # Kiểm tra và tắt thiết bị nếu chưa tắt
+                    off_icons = find_all_images("images/off_icon1.png", region=region_abs, threshold=0.7)
+                    if off_icons:
+                        print(f"[INFO] Thiết bị chưa tắt, click để tắt")
+                        pyautogui.click(off_icons[0])
+                        time.sleep(2)
+
+                        # Click lại setting_icon để kick room
+                        pyautogui.click(target)
+                        time.sleep(1.5)
+                    else:
+                        print(f"[INFO] Thiết bị đã tắt, không cần click off_icon")
+
+                    # Kick room
                     click_image_in_region("images/kickroom.png", window=window, region_ratio=region_ratio)
                     time.sleep(3)
-                    click_image_in_region("images/back1.png", window=window, region_ratio=region_ratio)
+
+                    # Quay lại màn hình chính
+                    click_image_in_region("images/back1.png", window=window, region_ratio=[0,0,1,1])
                     time.sleep(1)
+                    click_image_in_region("images/ldplay.png", window=window, region_ratio=[0,0,1,1])
+                    time.sleep(1)
+
                     found_new = True
+                    break
                 else:
                     print(f"[INFO] Thiết bị {copied_text} không trùng -> bỏ qua")
 
-            if not found_new:
-                print("[INFO] Không còn thiết bị cần xóa -> dừng vòng lặp")
+            if found_new:
+                print("[INFO] Đã kick room, dừng vòng lặp")
                 break
 
-            # scroll xuống hết vùng quét để tìm thêm
+            # Scroll xuống nếu chưa kick
             pyautogui.moveTo(region_abs[0]+region_abs[2]//2, region_abs[1]+region_abs[3]//2)
             pyautogui.scroll(-region_abs[3])
             time.sleep(1)
 
         print(f"[INFO] Danh sách thiết bị copy được: {copied_names}")
         return list(copied_names)
-
 
 
     elif action_type == "click_bottom_icon_only":
