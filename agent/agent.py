@@ -31,6 +31,8 @@ JSON_PATH = "close_room.json"
 tesseract_path = os.getenv("TESSERACT_PATH", r"D:\project12m\OslinkSymtem\tessat\tesseract.exe")
 pytesseract.pytesseract.tesseract_cmd = tesseract_path
 
+# --- Biến toàn cục lưu tên thiết bị đã copy ---
+copied_names_global = set()
 # Global queue
 request_queue = queue.Queue()
 
@@ -423,9 +425,14 @@ def run_action(action, room_name=None, **kwargs):
                 pyautogui.click(cx, cy)
                 print(f"[INFO] Click số nhỏ nhất {min_num} tại ({cx}, {cy}) trong '{window}'")
             else:
-                print("[WARN] Không tìm thấy số nào trong vùng.")
+                print("[WARN] Không tìm thấy số nào trong vùng. Fallback click vị trí khác.")
+                # ---- fallback click sang vị trí tùy chỉnh ----
+                # ví dụ click góc trên bên phải vùng quét
+                cx = region_abs[0] + int(region_abs[2] * 0.8)
+                cy = region_abs[1] + int(region_abs[3] * 0.2)
+                pyautogui.click(cx, cy)
+                print(f"[INFO] Fallback click tại ({cx},{cy})")
         return None
-
 
     elif action_type == "scroll_window":
         window = action.get("window", "LDPlayer")
@@ -831,6 +838,234 @@ def run_action(action, room_name=None, **kwargs):
         return None
 
 
+    elif action_type == "get_idle_device_name_all":
+        window = action.get("window", "LDPlayer")
+        region_ratio = action.get("region", [0.002, 0.149, 0.972, 0.732])
+
+        rect = window_rect_abs(window)
+        if not rect:
+            print(f"[ERROR] Không tìm thấy cửa sổ '{window}'")
+            return None
+
+        all_names = set()
+        scroll_attempts = 5
+
+        for attempt in range(scroll_attempts):
+            region_abs = ratio_region_to_abs(rect, region_ratio)
+            setting_icons = find_all_images("images/setting_icon.png", region=region_abs, threshold=0.88)
+            print(f"[DEBUG] Scroll attempt {attempt+1}/{scroll_attempts}, tìm thấy {len(setting_icons)} setting_icon")
+
+            if not setting_icons:
+                pyautogui.moveTo(region_abs[0] + region_abs[2] // 2,
+                                region_abs[1] + region_abs[3] // 2)
+                pyautogui.scroll(-region_abs[3])   # scroll hết vùng quét
+                time.sleep(1)
+                continue
+
+            found_new = False  # Cờ để kiểm tra có thiết bị mới không
+
+            for idx, target in enumerate(setting_icons, 1):
+                print(f"[DEBUG] Xử lý setting_icon {idx}/{len(setting_icons)} tại {target}")
+                pyautogui.click(target)
+                time.sleep(1.5)
+
+                # vào rename
+                click_image_in_region("images/rename_button.png", window=window, region_ratio=region_ratio)
+                time.sleep(1)
+
+                # giữ chuột textbox
+                textbox_x, textbox_y = 876, 522
+                pyautogui.mouseDown(x=textbox_x, y=textbox_y)
+                time.sleep(0.5)
+                pyautogui.mouseUp(x=textbox_x, y=textbox_y)
+                time.sleep(0.5)
+
+                # copy text
+                click_image_in_region("images/select_all.png", window=window, region_ratio=[0, 0, 1, 1])
+                time.sleep(0.5)
+                click_image_in_region("images/saochep.png", window=window, region_ratio=[0, 0, 1, 1])
+                time.sleep(0.5)
+
+                copied_text = pyperclip.paste().strip().upper()
+                print(f"[DEBUG] Copy được: {copied_text}")
+
+                if copied_text and copied_text not in copied_names_global:
+                    all_names.add(copied_text)
+                    copied_names_global.add(copied_text)
+                    found_new = True
+                    print(f"[INFO] Thêm mới thiết bị {copied_text}")
+                else:
+                    print(f"[INFO] Thiết bị {copied_text} đã tồn tại -> bỏ qua")
+
+                # back ra
+                click_image_in_region("images/back_button.png", window=window, region_ratio=region_ratio)
+                time.sleep(1)
+
+            # --- Nếu không có thiết bị mới nào thì dừng vòng lặp ---
+            if not found_new:
+                print("[INFO] Không còn thiết bị mới, dừng vòng lặp.")
+                break
+
+            # scroll xuống hết vùng quét để tìm thêm
+            pyautogui.moveTo(region_abs[0] + region_abs[2] // 2,
+                            region_abs[1] + region_abs[3] // 2)
+            pyautogui.scroll(-region_abs[3])
+            time.sleep(1)
+
+        print(f"[INFO] Danh sách thiết bị copy được: {all_names}")
+
+        if not all_names:
+            print("[WARN] Không lấy được thiết bị nào")
+            return None
+
+        # --- Tìm số nhỏ nhất chưa tồn tại ---
+        prefix = None
+        numbers = []
+        for name in all_names:
+            if "-" in name:
+                parts = name.split("-")
+                prefix = parts[0].upper()
+                try:
+                    num = int(parts[1])
+                    numbers.append(num)
+                except:
+                    pass
+
+        if not prefix:
+            print("[ERROR] Không tìm thấy prefix hợp lệ trong danh sách")
+            return None
+
+        numbers = sorted(set(numbers))
+        new_number = 1
+        for n in numbers:
+            if n == new_number:
+                new_number += 1
+            elif n > new_number:
+                break
+
+        new_device_name = f"{prefix}-{new_number}"
+        pyperclip.copy(new_device_name)
+        print(f"[INFO] Sinh tên thiết bị mới: {new_device_name} (đã copy vào clipboard)")
+
+        return new_device_name
+
+    elif action_type == "delete_device_by_roomname":
+        window = action.get("window", "LDPlayer")
+        region_ratio = action.get("region", [0.002, 0.149, 0.972, 0.732])
+
+        # Lấy room_name từ hàm gọi
+        room_name = room_name
+        print(f"[DEBUG] Room name nhận được: '{room_name}'")
+
+        parts = room_name.split()
+        print(f"[DEBUG] parts của room_name: {parts}")
+
+        if len(parts) < 3:
+            print("[ERROR] Room name quá ngắn để lấy thiết bị")
+            return None
+
+        # --- Lấy thiết bị cần xóa từ phần thứ 3 ---
+        device_to_delete_raw = parts[2].upper()
+
+        # Chuẩn hóa ngược: B-01 -> B-1
+        if "-" in device_to_delete_raw:
+            prefix, num = device_to_delete_raw.split("-")
+            try:
+                device_to_delete = f"{prefix}-{int(num)}"
+            except:
+                device_to_delete = device_to_delete_raw
+        else:
+            device_to_delete = device_to_delete_raw
+
+        print(f"[INFO] Tên thiết bị cần xóa: {device_to_delete}")
+
+        rect = window_rect_abs(window)
+        if not rect:
+            print(f"[ERROR] Không tìm thấy cửa sổ '{window}'")
+            return None
+
+        copied_names = set()
+        scroll_attempts = 5
+
+        for attempt in range(scroll_attempts):
+            region_abs = ratio_region_to_abs(rect, region_ratio)
+            setting_icons = find_all_images("images/setting2.png", region=region_abs, threshold=0.88)
+            print(f"[DEBUG] Scroll attempt {attempt+1}/{scroll_attempts}, tìm thấy {len(setting_icons)} setting_icon")
+
+            if not setting_icons:
+                pyautogui.moveTo(region_abs[0] + region_abs[2]//2,
+                                region_abs[1] + region_abs[3]//2)
+                pyautogui.scroll(-region_abs[3])
+                time.sleep(1)
+                continue
+
+            found_new = False
+            for idx, target in enumerate(setting_icons, 1):
+                print(f"[DEBUG] Xử lý setting_icon {idx}/{len(setting_icons)} tại {target}")
+                pyautogui.click(target)
+                time.sleep(1.5)
+
+                # vào rename
+                click_image_in_region("images/rename2.png", window=window, region_ratio=region_ratio)
+                time.sleep(1)
+
+                # giữ chuột textbox
+                textbox_x, textbox_y = 888, 529
+                pyautogui.mouseDown(x=textbox_x, y=textbox_y)
+                time.sleep(0.5)
+                pyautogui.mouseUp(x=textbox_x, y=textbox_y)
+                time.sleep(0.5)
+
+                # copy text
+                click_image_in_region("images/select_all1.png", window=window, region_ratio=[0,0,1,1])
+                time.sleep(0.9)
+                click_image_in_region("images/saochep1.png", window=window, region_ratio=[0,0,1,1])
+                time.sleep(0.9)
+
+
+                copied_text_raw = pyperclip.paste().strip().upper()
+                # Chuẩn hóa ngược
+                if "-" in copied_text_raw:
+                    prefix, num = copied_text_raw.split("-")
+                    try:
+                        copied_text = f"{prefix}-{int(num)}"
+                    except:
+                        copied_text = copied_text_raw
+                else:
+                    copied_text = copied_text_raw
+
+                print(f"[DEBUG] Copy được: {copied_text}")
+                copied_names.add(copied_text)
+
+                # back ra ngay sau khi copy
+                click_image_in_region("images/back_button1.png", window=window, region_ratio=region_ratio)
+                time.sleep(1)
+
+                # Nếu tên thiết bị trùng thì click lại icon và xóa
+                if copied_text == device_to_delete:
+                    print(f"[INFO] Tìm thấy thiết bị cần xóa: {copied_text} -> click lại icon để xóa")
+                    pyautogui.click(target)  # click lại vào icon
+                    time.sleep(1.5)
+                    click_image_in_region("images/kickroom.png", window=window, region_ratio=region_ratio)
+                    time.sleep(3)
+                    click_image_in_region("images/back1.png", window=window, region_ratio=region_ratio)
+                    time.sleep(1)
+                    found_new = True
+                else:
+                    print(f"[INFO] Thiết bị {copied_text} không trùng -> bỏ qua")
+
+            if not found_new:
+                print("[INFO] Không còn thiết bị cần xóa -> dừng vòng lặp")
+                break
+
+            # scroll xuống hết vùng quét để tìm thêm
+            pyautogui.moveTo(region_abs[0]+region_abs[2]//2, region_abs[1]+region_abs[3]//2)
+            pyautogui.scroll(-region_abs[3])
+            time.sleep(1)
+
+        print(f"[INFO] Danh sách thiết bị copy được: {copied_names}")
+        return list(copied_names)
+
 
 
     elif action_type == "click_bottom_icon_only":
@@ -894,70 +1129,56 @@ def run_action(action, room_name=None, **kwargs):
         if not rect_full:
             print(f"[ERROR] Không tìm thấy window '{window}'")
             return None
-        x0 = int(rect_full[0] + rect_full[2] * region_ratio[0])
-        y0 = int(rect_full[1] + rect_full[3] * region_ratio[1])
-        w = int(rect_full[2] * region_ratio[2])
-        h = int(rect_full[3] * region_ratio[3])
-        rect = (x0, y0, w, h)
+
+        rect = ratio_region_to_abs(rect_full, region_ratio)
+        if not rect:
+            print("[ERROR] Không tính được region abs")
+            return None
 
         all_names = set()
         scroll_count = 0
-        clicked = False  # chỉ dùng để scroll
 
         while scroll_count <= max_scrolls:
-            # Screenshot toàn vùng
             screenshot_full = pyautogui.screenshot(region=rect)
             screenshot_cv = cv2.cvtColor(np.array(screenshot_full), cv2.COLOR_RGB2BGR)
 
-            # Tìm tất cả vị trí icon
+            # --- Tìm tất cả icon ---
             icon_positions = find_all_images(off_icon, region=rect)
-            print(f"[INFO] Tìm thấy {len(icon_positions)} icon '{off_icon}' (scroll lần {scroll_count})")
+            print(f"[INFO] Tìm thấy {len(icon_positions)} icon '{off_icon}' (scroll {scroll_count})")
 
             for idx, (cx, cy) in enumerate(icon_positions):
-                icon_w, icon_h = 50, 50  
+                icon_w, icon_h = 50, 50
 
                 # --- Crop OCR bên trái icon ---
-                offset_left = 489
-                offset_right = 20
-                offset_top = 30
-                offset_bottom = -30
-
+                offset_left, offset_right, offset_top, offset_bottom = 489, 20, 30, -30
                 x1 = cx - rect[0] - offset_left
                 y1 = cy - rect[1] - offset_top
                 x2 = cx - rect[0] + offset_right
                 y2 = cy - rect[1] + icon_h + offset_bottom
 
-                # đảm bảo không vượt ngoài ảnh
-                x1 = max(0, x1)
-                y1 = max(0, y1)
-                x2 = min(screenshot_cv.shape[1], x2)
-                y2 = min(screenshot_cv.shape[0], y2)
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(screenshot_cv.shape[1], x2), min(screenshot_cv.shape[0], y2)
 
                 crop_img = screenshot_cv[y1:y2, x1:x2]
-
-                # --- Debug lưu ảnh ---
-                debug_img = screenshot_cv.copy()
-                cv2.rectangle(debug_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.imwrite(f"debug_getnew_box_{scroll_count}_{idx}.png", debug_img)
-                cv2.imwrite(f"debug_getnew_crop_{scroll_count}_{idx}.png", crop_img)
 
                 # Resize + threshold
                 scale = 3
                 crop_img = cv2.resize(crop_img, (0, 0), fx=scale, fy=scale)
                 gray = cv2.cvtColor(crop_img, cv2.COLOR_BGR2GRAY)
                 _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                cv2.imwrite(f"debug_getnew_crop_thresh_{scroll_count}_{idx}.png", thresh)
 
                 # OCR
                 text = pytesseract.image_to_string(
                     thresh,
                     config='--psm 7 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-'
                 ).strip()
+
                 if text:
-                    all_names.add(text.upper())
+                    text = text.replace(" ", "").upper()
+                    all_names.add(text)
                     print(f"[DEBUG] OCR device: '{text}'")
 
-            # Scroll xuống
+            # --- Scroll xuống ---
             pyautogui.moveTo(rect[0] + rect[2] // 2, rect[1] + rect[3] // 2)
             pyautogui.scroll(-scroll_amount)
             scroll_count += 1
