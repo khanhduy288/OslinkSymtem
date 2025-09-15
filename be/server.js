@@ -1,4 +1,4 @@
-// server.js
+// server.js (updated)
 const express = require("express");
 const cors = require("cors");
 const sqlite3 = require("sqlite3").verbose();
@@ -9,7 +9,7 @@ const jwt = require("jsonwebtoken");
 
 const app = express();
 const PORT = 5000;
-const SECRET_KEY = "mysecretkey123"; // Thay đổi key mạnh hơn khi production
+const SECRET_KEY = "mysecretkey123"; // đổi thành key mạnh hơn trong production
 
 app.use(cors());
 app.use(express.json());
@@ -21,18 +21,19 @@ const db = new sqlite3.Database(dbPath, (err) => {
   else console.log("✅ SQLite connected:", dbPath);
 });
 
-// ====== Tạo bảng users ======
+// ====== Create / migrate users table if not exists ======
 db.serialize(() => {
+  // Create table with phone & username (phone unique)
   db.run(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      email TEXT NOT NULL UNIQUE,
+      phone TEXT NOT NULL UNIQUE,
+      username TEXT NOT NULL UNIQUE,
       password TEXT NOT NULL,
       level INTEGER NOT NULL DEFAULT 1,
       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
-
 
   db.run(`
     CREATE TABLE IF NOT EXISTS rentals (
@@ -69,55 +70,80 @@ function toSqlDateTime(d) {
   );
 }
 
+// ====== Validation helpers (light) ======
+function isValidPhone(phone) {
+  // VN phone: starts with 0 and total 10-11 digits (adjust if needed)
+  return /^0\d{9,10}$/.test(phone);
+}
+
+function isValidPassword(pw) {
+  return typeof pw === "string" && pw.length >= 6;
+}
+
+function isValidUsername(name) {
+  // allow letters, numbers, underscore, dash; length 3-30
+  return /^[A-Za-z0-9_-]{3,30}$/.test(name);
+}
+
 // ====== API Register ======
-
 app.post("/register", async (req, res) => {
-  const { email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ message: "Missing params" });
+  try {
+    const { phone, password, username } = req.body;
+    if (!phone || !password || !username) return res.status(400).json({ message: "Missing params" });
 
-  const hashedPassword = await bcrypt.hash(password, 10);
+    if (!isValidPhone(phone)) return res.status(400).json({ message: "Số điện thoại không hợp lệ" });
+    if (!isValidPassword(password)) return res.status(400).json({ message: "Mật khẩu quá ngắn (>=6)" });
+    if (!isValidUsername(username)) return res.status(400).json({ message: "Username không hợp lệ (3-30 ký tự, chữ/số/_/-)" });
 
-  db.run(
-    `INSERT INTO users (email, password, level) VALUES (?, ?, 1)`,
-    [email, hashedPassword],
-    function(err) {
-      if (err) {
-        if (err.message.includes("UNIQUE")) return res.status(400).json({ message: "Email đã tồn tại" });
-        return res.status(500).json({ message: "DB error" });
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    db.run(
+      `INSERT INTO users (phone, username, password, level) VALUES (?, ?, ?, 1)`,
+      [phone, username, hashedPassword],
+      function(err) {
+        if (err) {
+          if (err.message && err.message.includes("UNIQUE")) {
+            // detect which field conflicts
+            if (err.message.includes("users.phone")) return res.status(400).json({ message: "Số điện thoại đã tồn tại" });
+            if (err.message.includes("users.username")) return res.status(400).json({ message: "Username đã tồn tại" });
+            return res.status(400).json({ message: "Dữ liệu đã tồn tại" });
+          }
+          return res.status(500).json({ message: "DB error" });
+        }
+        db.get(`SELECT id, phone, username, level, createdAt FROM users WHERE id=?`, [this.lastID], (err2, row) => {
+          if (err2) return res.status(500).json({ message: "DB error" });
+          res.json({ message: "Đăng ký thành công!", user: row });
+        });
       }
-      db.get(`SELECT id, email, level, createdAt FROM users WHERE id=?`, [this.lastID], (err2, row) => {
-        if (err2) return res.status(500).json({ message: "DB error" });
-        res.json({ message: "Đăng ký thành công!", user: row });
-      });
-    }
-  );
+    );
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Server error" });
+  }
 });
 
-
-// ====== API Login ======
-
+// ====== API Login (by phone) ======
 app.post("/login", (req, res) => {
-  const { email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ message: "Missing params" });
+  const { phone, password } = req.body;
+  if (!phone || !password) return res.status(400).json({ message: "Missing params" });
 
-  db.get(`SELECT * FROM users WHERE email=?`, [email], async (err, user) => {
+  db.get(`SELECT * FROM users WHERE phone=?`, [phone], async (err, user) => {
     if (err) return res.status(500).json({ message: "DB error" });
-    if (!user) return res.status(404).json({ message: "Email không tồn tại" });
+    if (!user) return res.status(404).json({ message: "Số điện thoại không tồn tại" });
 
     const match = await bcrypt.compare(password, user.password);
     if (!match) return res.status(400).json({ message: "Mật khẩu không đúng" });
 
     // tạo token JWT
-    const token = jwt.sign({ id: user.id, level: user.level }, "your_secret_key", { expiresIn: "7d" });
+    const token = jwt.sign({ id: user.id, level: user.level }, SECRET_KEY, { expiresIn: "7d" });
 
     res.json({
       message: "Đăng nhập thành công!",
-      user: { id: user.id, email: user.email, level: user.level },
+      user: { id: user.id, phone: user.phone, username: user.username, level: user.level },
       token
     });
   });
 });
-
 
 // ====== Middleware auth (nếu cần) ======
 function authMiddleware(req, res, next) {
@@ -134,7 +160,7 @@ function authMiddleware(req, res, next) {
   }
 }
 
-// ====== API Rentals ======
+// ====== API Rentals (unchanged) ======
 app.post("/rentals", async (req, res) => {
   const { userId, rentalTime } = req.body;
   if (!userId || !rentalTime)
