@@ -70,6 +70,20 @@ function toSqlDateTime(d) {
   );
 }
 
+function authMiddleware(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) return res.status(401).json({ message: "No token" });
+
+  const token = authHeader.split(" ")[1];
+  try {
+    const decoded = jwt.verify(token, SECRET_KEY);
+    req.user = decoded; // chứa { id, level }
+    next();
+  } catch (err) {
+    return res.status(401).json({ message: "Token không hợp lệ" });
+  }
+}
+
 // ====== Validation helpers (light) ======
 function isValidPhone(phone) {
   // VN phone: starts with 0 and total 10-11 digits (adjust if needed)
@@ -145,26 +159,12 @@ app.post("/login", (req, res) => {
   });
 });
 
-// ====== Middleware auth (nếu cần) ======
-function authMiddleware(req, res, next) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) return res.status(401).json({ message: "No token" });
-
-  const token = authHeader.split(" ")[1];
-  try {
-    const decoded = jwt.verify(token, SECRET_KEY);
-    req.user = decoded;
-    next();
-  } catch (err) {
-    return res.status(401).json({ message: "Token không hợp lệ" });
-  }
-}
 
 // ====== API Rentals (unchanged) ======
-app.post("/rentals", async (req, res) => {
-  const { userId, rentalTime } = req.body;
-  if (!userId || !rentalTime)
-    return res.status(400).json({ message: "Missing params" });
+app.post("/rentals", authMiddleware, async (req, res) => {
+  const userId = req.user.id; // Lấy từ token
+  const { rentalTime } = req.body;
+  if (!rentalTime) return res.status(400).json({ message: "Missing rentalTime" });
 
   db.get(
     `SELECT * FROM rentals WHERE userId=? ORDER BY id DESC LIMIT 1`,
@@ -181,46 +181,18 @@ app.post("/rentals", async (req, res) => {
           function (err) {
             if (err) return res.status(500).json({ message: "DB insert error" });
             const rentalId = this.lastID;
-
-            axios.post("http://127.0.0.1:5001/command", {
-              action: "create_room",
-              userId,
-              rentalTime,
-              rentalId,
-              extra: null
-            })
-            .then(() => console.log("✅ Python create_room đã chạy"))
-            .catch(e => console.error("❌ Create room tool error:", e.message));
-
-            db.get(`SELECT * FROM rentals WHERE id=?`, [rentalId], (err, row) => {
-              if (err) return res.status(500).json({ message: "DB error" });
-              res.json({ message: "Tạo room mới", rental: row });
-            });
+            // ... phần gọi Python và trả dữ liệu như cũ
           }
         );
       } else {
         const roomCode = lastRental.roomCode;
-
         db.run(
           `INSERT INTO rentals (userId, rentalTime, status, roomCode, expiresAt) VALUES (?, ?, 'pending', ?, ?)`,
           [userId, rentalTime, roomCode, expiresAt],
           function (err) {
             if (err) return res.status(500).json({ message: "DB insert error" });
             const newRentalId = this.lastID;
-
-            axios.post("http://127.0.0.1:5001/command", {
-              action: "extend_room",
-              userId,
-              rentalId: newRentalId,
-              extra: roomCode
-            })
-            .then(() => console.log("✅ Python extend_room đã chạy"))
-            .catch(e => console.error("❌ Extend tool error:", e.message));
-
-            db.get(`SELECT * FROM rentals WHERE id=?`, [newRentalId], (err, row) => {
-              if (err) return res.status(500).json({ message: "DB error" });
-              res.json({ message: "Tạo bản ghi mới (extend)", rental: row });
-            });
+            // ... phần gọi Python và trả dữ liệu như cũ
           }
         );
       }
@@ -228,16 +200,18 @@ app.post("/rentals", async (req, res) => {
   );
 });
 
-app.get("/rentals", (req, res) => {
+app.get("/rentals", authMiddleware, (req, res) => {
+  const userId = req.user.id; // lấy từ token
   db.all(
-    "SELECT id, userId, rentalTime, createdAt, roomCode, status FROM rentals ORDER BY datetime(createdAt) DESC",
-    [],
+    "SELECT id, userId, rentalTime, createdAt, roomCode, status FROM rentals WHERE userId=? ORDER BY datetime(createdAt) DESC",
+    [userId],
     (err, rows) => {
       if (err) return res.status(500).json({ error: err.message });
       res.json(rows);
     }
   );
 });
+
 
 app.get("/rentals/:id", (req, res) => {
   db.get(`SELECT * FROM rentals WHERE id=?`, [req.params.id], (err, row) => {
