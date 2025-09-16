@@ -354,32 +354,6 @@ app.post('/admin/set-level', async (req, res) => {
 });
 
 
-// 🚨 Reset bảng users (chỉ dùng dev/test)
-app.post("/reset-users", (req, res) => {
-  const secret = req.query.secret;
-  if (secret !== "khanh123") {
-    return res.status(403).json({ message: "Không có quyền reset" });
-  }
-
-  db.run("DROP TABLE IF EXISTS users", (err) => {
-    if (err) return res.status(500).json({ message: "DB error", error: err.message });
-
-    db.run(`
-      CREATE TABLE users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        phone TEXT NOT NULL UNIQUE,
-        username TEXT NOT NULL UNIQUE,
-        password TEXT NOT NULL,
-        level INTEGER NOT NULL DEFAULT 1,
-        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `, (err2) => {
-      if (err2) return res.status(500).json({ message: "DB error", error: err2.message });
-      res.json({ message: "✅ Users table reset thành công!" });
-    });
-  });
-});
-
 // ====== Background auto-expire (mỗi 60s) ======
 setInterval(() => {
   const nowSql = toSqlDateTime(new Date());
