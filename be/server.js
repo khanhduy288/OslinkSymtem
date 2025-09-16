@@ -325,20 +325,41 @@ app.post("/rentals/:id/extend", (req, res) => {
 });
 
 app.patch("/rentals/:id", (req, res) => {
-  const { roomCode, status } = req.body;
+  const { roomCode, status, rentalTime } = req.body;
   const { id } = req.params;
 
-  db.run(
-    `UPDATE rentals SET roomCode=?, status=? WHERE id=?`,
-    [roomCode, status || 'active', id],
-    function (err) {
-      if (err) return res.status(500).json({ message: "DB error" });
-      db.get(`SELECT * FROM rentals WHERE id=?`, [id], (err2, row) => {
+  db.get(`SELECT * FROM rentals WHERE id=?`, [id], (err, rental) => {
+    if (err) return res.status(500).json({ message: "DB error" });
+    if (!rental) return res.status(404).json({ message: "Rental not found" });
+
+    // Nếu FE gửi rentalTime thì cập nhật, ngược lại giữ nguyên
+    const newRentalTime = rentalTime ?? rental.rentalTime;
+    const newRoomCode = roomCode ?? rental.roomCode;
+    const newStatus = status ?? rental.status;
+
+    db.run(
+      `UPDATE rentals SET roomCode=?, status=?, rentalTime=? WHERE id=?`,
+      [newRoomCode, newStatus, newRentalTime, id],
+      function (err2) {
         if (err2) return res.status(500).json({ message: "DB error" });
-        res.json({ message: "Room updated", rental: row });
-      });
-    }
-  );
+        db.get(`SELECT * FROM rentals WHERE id=?`, [id], (err3, updated) => {
+          if (err3) return res.status(500).json({ message: "DB error" });
+          res.json({ message: "Rental updated", rental: updated });
+        });
+      }
+    );
+  });
+});
+
+app.delete("/rentals/:id", (req, res) => {
+  const { id } = req.params;
+
+  db.run("DELETE FROM rentals WHERE id = ?", [id], function (err) {
+    if (err) return res.status(500).json({ message: "DB error" });
+    if (this.changes === 0) return res.status(404).json({ message: "Rental not found" });
+
+    res.json({ message: "Rental deleted successfully" });
+  });
 });
 
 // Chỉ tạo tạm, xóa sau khi xong
