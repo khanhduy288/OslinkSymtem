@@ -212,6 +212,13 @@ app.get("/rentals", authMiddleware, (req, res) => {
   );
 });
 
+app.get("/admin/rentals", authMiddleware, (req, res) => {
+  if (req.user.level < 10) return res.status(403).json({ message: "Không đủ quyền" });
+  db.all("SELECT rentals.*, users.username FROM rentals JOIN users ON rentals.userId=users.id ORDER BY datetime(createdAt) DESC", [], (err, rows) => {
+    if (err) return res.status(500).json({ message: err.message });
+    res.json(rows);
+  });
+});
 
 app.get("/rentals/:id", (req, res) => {
   db.get(`SELECT * FROM rentals WHERE id=?`, [req.params.id], (err, row) => {
@@ -220,6 +227,32 @@ app.get("/rentals/:id", (req, res) => {
     res.json(row);
   });
 });
+
+app.patch("/admin/rentals/:id", authMiddleware, (req, res) => {
+  if (req.user.level < 10) return res.status(403).json({ message: "Không đủ quyền" });
+  const { status } = req.body;
+  const { id } = req.params;
+  db.run("UPDATE rentals SET status=? WHERE id=?", [status, id], function(err){
+    if(err) return res.status(500).json({ message: err.message });
+    res.json({ message: "Cập nhật thành công" });
+  });
+});
+
+app.get("/admin/stats", authMiddleware, (req,res)=>{
+  if(req.user.level < 10) return res.status(403).json({message:"Không đủ quyền"});
+  db.get("SELECT COUNT(*) as totalUsers FROM users", [], (err,u)=> {
+    db.get("SELECT COUNT(*) as totalRentals FROM rentals", [], (err,r)=>{
+      db.get("SELECT SUM(rentalTime*pricePerTab) as revenue FROM rentals WHERE status='active'", [], (err,s)=>{
+        res.json({
+          totalUsers: u.totalUsers,
+          totalRentals: r.totalRentals,
+          revenue: s.revenue || 0
+        });
+      });
+    });
+  });
+});
+
 
 app.post("/rentals/:id/expire", async (req, res) => {
   try {
