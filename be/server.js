@@ -22,8 +22,9 @@ const db = new sqlite3.Database(dbPath, (err) => {
 });
 
 // ====== Create / migrate users table if not exists ======
+// ====== Create / migrate users & rentals table if not exists ======
 db.serialize(() => {
-  // Create table with phone & username (phone unique)
+  // Users table
   db.run(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,6 +36,7 @@ db.serialize(() => {
     )
   `);
 
+  // Rentals table (thêm 3 cột mới để support gia hạn)
   db.run(`
     CREATE TABLE IF NOT EXISTS rentals (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -43,10 +45,14 @@ db.serialize(() => {
       roomCode TEXT,
       status TEXT NOT NULL DEFAULT 'pending',
       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-      expiresAt DATETIME
+      expiresAt DATETIME,
+      requestedExtendMonths INTEGER,
+      extendTimeInMinutes INTEGER,
+      tabs INTEGER
     )
   `);
 });
+
 
 // ====== Helpers ======
 function addMinutes(date, minutes) {
