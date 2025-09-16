@@ -375,7 +375,7 @@ app.post('/admin/set-level', async (req, res) => {
 });
 
 // 🟢 User gửi yêu cầu gia hạn
-app.post("/rentals/:id/request-extend", authenticateToken, (req, res) => {
+app.post("/rentals/:id/request-extend", authMiddleware, (req, res) => {
   const { id } = req.params;
   const { requestedExtendMonths, extendTimeInMinutes, tabs } = req.body;
 
@@ -395,7 +395,7 @@ app.post("/rentals/:id/request-extend", authenticateToken, (req, res) => {
 });
 
 // 🟢 Admin xác nhận gia hạn
-app.patch("/rentals/:id/confirm-extend", authenticateToken, (req, res) => {
+app.patch("/rentals/:id/confirm-extend", authMiddleware, (req, res) => {
   const { id } = req.params;
 
   db.get(`SELECT * FROM rentals WHERE id = ?`, [id], (err, rental) => {
@@ -420,7 +420,7 @@ app.patch("/rentals/:id/confirm-extend", authenticateToken, (req, res) => {
 });
 
 // 🟢 Admin từ chối gia hạn
-app.patch("/rentals/:id/reject-extend", authenticateToken, (req, res) => {
+app.patch("/rentals/:id/reject-extend", authMiddleware, (req, res) => {
   const { id } = req.params;
 
   db.run(
