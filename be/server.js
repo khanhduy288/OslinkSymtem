@@ -159,6 +159,15 @@ app.post("/login", (req, res) => {
   });
 });
 
+// GET tất cả users (chỉ admin)
+app.get("/admin/users", authMiddleware, (req, res) => {
+  if (req.user.level < 10) return res.status(403).json({ message: "Không đủ quyền" });
+
+  db.all("SELECT id, phone, username, level, createdAt FROM users ORDER BY id ASC", [], (err, rows) => {
+    if (err) return res.status(500).json({ message: err.message });
+    res.json(rows);
+  });
+});
 
 // ====== API Rentals (unchanged) ======
 app.post("/rentals", authMiddleware, async (req, res) => {
