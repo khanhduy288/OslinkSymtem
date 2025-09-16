@@ -374,6 +374,70 @@ app.post('/admin/set-level', async (req, res) => {
   });
 });
 
+// 🟢 User gửi yêu cầu gia hạn
+app.post("/rentals/:id/request-extend", authenticateToken, (req, res) => {
+  const { id } = req.params;
+  const { requestedExtendMonths, extendTimeInMinutes, tabs } = req.body;
+
+  db.run(
+    `UPDATE rentals 
+     SET status = 'pending_extend', 
+         requestedExtendMonths = ?, 
+         extendTimeInMinutes = ?, 
+         tabs = ?
+     WHERE id = ?`,
+    [requestedExtendMonths, extendTimeInMinutes, tabs, id],
+    function (err) {
+      if (err) return res.status(500).json({ message: "DB error" });
+      res.json({ message: "Yêu cầu gia hạn đã gửi, chờ admin xác nhận" });
+    }
+  );
+});
+
+// 🟢 Admin xác nhận gia hạn
+app.patch("/rentals/:id/confirm-extend", authenticateToken, (req, res) => {
+  const { id } = req.params;
+
+  db.get(`SELECT * FROM rentals WHERE id = ?`, [id], (err, rental) => {
+    if (err || !rental) return res.status(404).json({ message: "Rental không tồn tại" });
+
+    const newRentalTime = rental.rentalTime + (rental.extendTimeInMinutes || 0);
+
+    db.run(
+      `UPDATE rentals 
+       SET status = 'active', 
+           rentalTime = ?, 
+           requestedExtendMonths = NULL, 
+           extendTimeInMinutes = NULL 
+       WHERE id = ?`,
+      [newRentalTime, id],
+      function (err2) {
+        if (err2) return res.status(500).json({ message: "DB error" });
+        res.json({ message: "Gia hạn thành công", rentalId: id, newRentalTime });
+      }
+    );
+  });
+});
+
+// 🟢 Admin từ chối gia hạn
+app.patch("/rentals/:id/reject-extend", authenticateToken, (req, res) => {
+  const { id } = req.params;
+
+  db.run(
+    `UPDATE rentals 
+     SET status = 'active', 
+         requestedExtendMonths = NULL, 
+         extendTimeInMinutes = NULL 
+     WHERE id = ?`,
+    [id],
+    function (err) {
+      if (err) return res.status(500).json({ message: "DB error" });
+      res.json({ message: "Đã từ chối gia hạn", rentalId: id });
+    }
+  );
+});
+
+
 
 // ====== Background auto-expire (mỗi 60s) ======
 setInterval(() => {
@@ -394,7 +458,7 @@ setInterval(() => {
       }
     }
   );
-}, 60 * 1000);
+},24 * 60 * 60 * 1000);
 
 // ====== Start ======
 app.listen(PORT, () => {
