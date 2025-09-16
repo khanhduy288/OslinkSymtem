@@ -332,6 +332,18 @@ app.patch("/rentals/:id", (req, res) => {
   );
 });
 
+// Chỉ tạo tạm, xóa sau khi xong
+app.post('/admin/set-level', async (req, res) => {
+  const { userId, level } = req.body;
+
+  // Có thể check token admin nếu muốn
+  const sql = `UPDATE users SET level = ? WHERE id = ?`;
+  db.run(sql, [level, userId], function(err) {
+    if (err) return res.status(500).json({ message: err.message });
+    res.json({ message: `Cập nhật level user ${userId} thành ${level}` });
+  });
+});
+
 
 // 🚨 Reset bảng users (chỉ dùng dev/test)
 app.post("/reset-users", (req, res) => {
