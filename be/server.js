@@ -10,7 +10,7 @@ const jwt = require("jsonwebtoken");
 const app = express();
 const PORT = 5000;
 const SECRET_KEY = "mysecretkey123"; // đổi thành key mạnh hơn trong production
-const WORKER_API = "https://06e11082d82b.ngrok-free.app";
+const WORKER_API = "https://aa68fd956a0c.ngrok-free.app";
 
 app.use(cors());
 app.use(express.json());
