@@ -215,10 +215,15 @@ app.post("/rentals", authMiddleware, async (req, res) => {
 });
 
 
+// API cho user thường
 app.get("/rentals", authMiddleware, (req, res) => {
-  const userId = req.user.id; // lấy từ token
+  const userId = req.user.id;
   db.all(
-    "SELECT id, userId, rentalTime, createdAt, roomCode, status FROM rentals WHERE userId=? ORDER BY datetime(createdAt) DESC",
+    `SELECT rentals.*, users.username 
+     FROM rentals 
+     JOIN users ON rentals.userId = users.id 
+     WHERE rentals.userId=? 
+     ORDER BY datetime(rentals.createdAt) DESC`,
     [userId],
     (err, rows) => {
       if (err) return res.status(500).json({ error: err.message });
@@ -227,12 +232,20 @@ app.get("/rentals", authMiddleware, (req, res) => {
   );
 });
 
+// API cho admin
 app.get("/admin/rentals", authMiddleware, (req, res) => {
   if (req.user.level < 10) return res.status(403).json({ message: "Không đủ quyền" });
-  db.all("SELECT rentals.*, users.username FROM rentals JOIN users ON rentals.userId=users.id ORDER BY datetime(createdAt) DESC", [], (err, rows) => {
-    if (err) return res.status(500).json({ message: err.message });
-    res.json(rows);
-  });
+  db.all(
+    `SELECT rentals.*, users.username 
+     FROM rentals 
+     JOIN users ON rentals.userId = users.id 
+     ORDER BY datetime(rentals.createdAt) DESC`,
+    [],
+    (err, rows) => {
+      if (err) return res.status(500).json({ message: err.message });
+      res.json(rows);
+    }
+  );
 });
 
 app.get("/rentals/:id", (req, res) => {
