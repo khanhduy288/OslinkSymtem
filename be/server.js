@@ -12,7 +12,17 @@ const PORT = 5000;
 const SECRET_KEY = "mysecretkey123"; // đổi thành key mạnh hơn trong production
 const WORKER_API = "https://61e1ee55fb97.ngrok-free.app";
 
-app.use(cors());
+app.use(cors({
+  origin: "*",  // hoặc chỉ định frontend domain
+  methods: ["GET","POST","PATCH","DELETE","OPTIONS"],
+  allowedHeaders: ["Content-Type","Authorization"],
+  credentials: true
+}));
+
+app.options("*", (req, res) => {
+  res.sendStatus(200);
+});
+
 app.use(express.json());
 
 // ====== SQLite init ======
