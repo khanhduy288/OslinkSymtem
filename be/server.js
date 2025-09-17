@@ -176,44 +176,44 @@ app.get("/admin/users", authMiddleware, (req, res) => {
 });
 
 // ====== API Rentals (unchanged) ======
+// ====== API Rentals (FE gửi username, tabs, months) ======
 app.post("/rentals", authMiddleware, async (req, res) => {
-  const userId = req.user.id; // Lấy từ token
-  const { rentalTime } = req.body;
-  if (!rentalTime) return res.status(400).json({ message: "Missing rentalTime" });
+  const { username, tabs, months } = req.body;
+  if (!username || !tabs || !months)
+    return res.status(400).json({ message: "Missing params" });
 
-  db.get(
-    `SELECT * FROM rentals WHERE userId=? ORDER BY id DESC LIMIT 1`,
-    [userId],
-    async (err, lastRental) => {
-      if (err) return res.status(500).json({ message: "DB error" });
+  try {
+    const rentalTimeInMinutes = months * 30 * 24 * 60; // 1 tháng = 30 ngày
+    const now = new Date();
 
-      const expiresAt = toSqlDateTime(addMinutes(new Date(), rentalTime));
-
-      if (!lastRental) {
-        db.run(
-          `INSERT INTO rentals (userId, rentalTime, status, expiresAt) VALUES (?, ?, 'pending', ?)`,
-          [userId, rentalTime, expiresAt],
-          function (err) {
-            if (err) return res.status(500).json({ message: "DB insert error" });
-            const rentalId = this.lastID;
-            // ... phần gọi Python và trả dữ liệu như cũ
-          }
-        );
-      } else {
-        const roomCode = lastRental.roomCode;
-        db.run(
-          `INSERT INTO rentals (userId, rentalTime, status, roomCode, expiresAt) VALUES (?, ?, 'pending', ?, ?)`,
-          [userId, rentalTime, roomCode, expiresAt],
-          function (err) {
-            if (err) return res.status(500).json({ message: "DB insert error" });
-            const newRentalId = this.lastID;
-            // ... phần gọi Python và trả dữ liệu như cũ
-          }
-        );
-      }
+    const rentalsToInsert = [];
+    for (let i = 0; i < tabs; i++) {
+      const expiresAt = toSqlDateTime(addMinutes(now, rentalTimeInMinutes));
+      rentalsToInsert.push({ username, rentalTime: rentalTimeInMinutes, expiresAt });
     }
-  );
+
+    // Insert n bản ghi
+    db.serialize(() => {
+      const stmt = db.prepare(
+        `INSERT INTO rentals (userId, rentalTime, status, createdAt, expiresAt, tabs) VALUES (?, ?, 'pending', ?, ?, ?)`
+      );
+
+      rentalsToInsert.forEach(r => {
+        stmt.run([req.user.id, r.rentalTime, toSqlDateTime(now), r.expiresAt, 1]);
+      });
+
+      stmt.finalize((err) => {
+        if (err) return res.status(500).json({ message: "DB insert error", error: err.message });
+        res.json({ message: `Tạo ${tabs} bản ghi thành công!` });
+      });
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
+  }
 });
+
 
 app.get("/rentals", authMiddleware, (req, res) => {
   const userId = req.user.id; // lấy từ token
