@@ -10,7 +10,6 @@ const jwt = require("jsonwebtoken");
 const app = express();
 const PORT = 5000;
 const SECRET_KEY = "mysecretkey123"; // đổi thành key mạnh hơn trong production
-const WORKER_API = " https://8e3ea9de9734.ngrok-free.app";
 
 app.use(cors({
   origin: "*",  // hoặc chỉ định frontend domain
@@ -62,8 +61,35 @@ db.serialize(() => {
       tabs INTEGER
     )
   `);
+    // Settings table
+  db.run(`
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    )
+  `);
+
+  // Set default WORKER_API nếu chưa có
+  db.get("SELECT value FROM settings WHERE key = 'WORKER_API'", (err, row) => {
+    if (err) console.error(err);
+    if (!row) {
+      db.run("INSERT INTO settings (key, value) VALUES (?, ?)", [
+        "WORKER_API",
+        "http://127.0.0.1:5001",
+      ]);
+      console.log("[INFO] WORKER_API set default = http://127.0.0.1:5001");
+    }
+  });
 });
 
+let WORKER_API = "http://127.0.0.1:5001"; // fallback
+
+db.get("SELECT value FROM settings WHERE key = 'WORKER_API'", (err, row) => {
+  if (row && row.value) {
+    WORKER_API = row.value;
+    console.log("[INFO] Loaded WORKER_API =", WORKER_API);
+  }
+});
 
 // ====== Helpers ======
 function addMinutes(date, minutes) {
@@ -166,8 +192,11 @@ app.post("/login", (req, res) => {
     if (!match) return res.status(400).json({ message: "Mật khẩu không đúng" });
 
     // tạo token JWT
-    const token = jwt.sign({ id: user.id, level: user.level }, SECRET_KEY, { expiresIn: "7d" });
-
+  const token = jwt.sign(
+    { id: user.id, level: user.level },
+    SECRET_KEY,
+    { expiresIn: "365d" } // 365 ngày
+  );
     res.json({
       message: "Đăng nhập thành công!",
       user: { id: user.id, phone: user.phone, username: user.username, level: user.level },
@@ -514,7 +543,38 @@ app.patch("/rentals/:id/reject-extend", authMiddleware, (req, res) => {
 });
 
 
+// ====== API cho admin lấy WORKER_API hiện tại ======
+app.get("/admin/worker", authMiddleware, (req, res) => {
+  if (req.user.level < 10) return res.status(403).json({ message: "Không đủ quyền" });
 
+  db.get("SELECT value FROM settings WHERE key = 'WORKER_API'", (err, row) => {
+    if (err) {
+      console.error("[DB ERROR]", err);
+      return res.status(500).json({ message: "DB error" });
+    }
+    res.json({ WORKER_API: row ? row.value : WORKER_API });
+  });
+});
+
+// ====== API cho admin update WORKER_API ======
+app.patch("/admin/worker", authMiddleware, (req, res) => {
+  if (req.user.level < 10) return res.status(403).json({ message: "Không đủ quyền" });
+
+  const { url } = req.body;
+  if (!url || !url.startsWith("http")) {
+    return res.status(400).json({ message: "URL không hợp lệ" });
+  }
+
+  WORKER_API = url;
+  db.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ["WORKER_API", url], (err) => {
+    if (err) {
+      console.error("[DB ERROR]", err);
+      return res.status(500).json({ message: "DB error" });
+    }
+    console.log("[INFO] WORKER_API updated =", WORKER_API);
+    res.json({ message: "WORKER_API updated", WORKER_API });
+  });
+});
 // ====== Background auto-expire (mỗi 60s) ======
 setInterval(() => {
   const nowSql = toSqlDateTime(new Date());
