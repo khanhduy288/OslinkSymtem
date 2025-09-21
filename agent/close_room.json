@@ -28,5 +28,8 @@
   { "type": "wait", "seconds": 2 },
   { "type": "click", "image": "images/confirmdelete.png" },
   { "type": "wait", "seconds": 2 },
-  { "type": "close_app", "image": "images/closeapp1.png" }
+  { "type": "scroll_up_max" },
+  { "type": "wait", "seconds": 3 },
+  { "type": "click", "image": "images/focustab.png" }
+
 ]

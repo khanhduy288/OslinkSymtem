@@ -1,6 +1,6 @@
 curl -X POST http://127.0.0.1:5001/command -H "Content-Type: application/json" -d "{\"action\":\"create_room\",\"userId\":\"user123\",\"rentalTime\":1,\"rentalId\":\"abc123\"}"
 curl -X POST http://localhost:5001/command -H "Content-Type: application/json" -d "{\"action\":\"close_room\",\"userId\":\"user123\",\"rentalId\":1,\"roomCode\":\"B khach1 B-3 fj27ddbyt5cknhxma\"}"
-curl -X POST http://localhost:5001/command -H "Content-Type: application/json" -d "{\"action\":\"extend_room\",\"userId\":\"user123\",\"rentalId\":1,\"rentalTime\":60,\"roomCode\":\"F khach200 F-02 fj283ccrnfdnhj7zj\"}"
+curl -X POST http://localhost:5001/command -H "Content-Type: application/json" -d "{\"action\":\"extend_room\",\"userId\":\"user123\",\"rentalId\":1,\"rentalTime\":60,\"roomCode\":\"L L-15 khach12 fj28de92443mktmz5\"}"
 curl -X POST http://localhost:5001/command -H "Content-Type: application/json" -d "{\"action\":\"remove_group\",\"userId\":\"user123\",\"roomCode\":\"A khach200 F-3 fj27ddbyt5cknhxma\"}"
 curl -X POST http://localhost:5001/command -H "Content-Type: application/json" -d "{\"action\":\"change_devide\",\"userId\":\"user123\",\"roomCode\":\"F khach1 F-1 fj27ddbyt5cknhxma\"}"
 curl -X POST http://localhost:5001/command -H "Content-Type: application/json" -d "{\"action\":\"get_codenew\",\"userId\":\"user123\",\"rentalId\":1,\"roomCode\":\"A khach1 H-12 fj81273jasd\"}"

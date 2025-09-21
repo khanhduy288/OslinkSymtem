@@ -176,6 +176,115 @@ F
 
 
 
+    elif action_type == "get_idle_device_name_all":
+        window = action.get("window", "LDPlayer")
+        region_ratio = action.get("region", [0.002, 0.149, 0.972, 0.732])
 
+        rect = window_rect_abs(window)
+        if not rect:
+            print(f"[ERROR] Không tìm thấy cửa sổ '{window}'")
+            return None
+
+        all_names = set()
+        scroll_attempts = 5
+
+        for attempt in range(scroll_attempts):
+            region_abs = ratio_region_to_abs(rect, region_ratio)
+            setting_icons = find_all_images("images/setting_icon.png", region=region_abs, threshold=0.6)
+            print(f"[DEBUG] Scroll attempt {attempt+1}/{scroll_attempts}, tìm thấy {len(setting_icons)} setting_icon")
+
+            if not setting_icons:
+                pyautogui.moveTo(region_abs[0] + region_abs[2] // 2,
+                                region_abs[1] + region_abs[3] // 2)
+                pyautogui.scroll(-region_abs[3])   # scroll hết vùng quét
+                time.sleep(1)
+                continue
+
+            found_new = False  # Cờ để kiểm tra có thiết bị mới không
+
+            for idx, target in enumerate(setting_icons, 1):
+                print(f"[DEBUG] Xử lý setting_icon {idx}/{len(setting_icons)} tại {target}")
+                pyautogui.click(target)
+                time.sleep(1.5)
+
+                # vào rename
+                click_image_in_region("images/rename_button.png", window=window, region_ratio=region_ratio)
+                time.sleep(1)
+
+                # giữ chuột textbox
+                textbox_x, textbox_y = 876, 522
+                pyautogui.mouseDown(x=textbox_x, y=textbox_y)
+                time.sleep(0.5)
+                pyautogui.mouseUp(x=textbox_x, y=textbox_y)
+                time.sleep(0.5)
+
+                # copy text
+                click_image_in_region("images/select_all.png", window=window, region_ratio=[0, 0, 1, 1])
+                time.sleep(0.5)
+                click_image_in_region("images/saochep.png", window=window, region_ratio=[0, 0, 1, 1])
+                time.sleep(0.5)
+
+                copied_text = pyperclip.paste().strip().upper()
+                print(f"[DEBUG] Copy được: {copied_text}")
+
+                if copied_text and copied_text not in copied_names_global:
+                    all_names.add(copied_text)
+                    copied_names_global.add(copied_text)
+                    found_new = True
+                    print(f"[INFO] Thêm mới thiết bị {copied_text}")
+                else:
+                    print(f"[INFO] Thiết bị {copied_text} đã tồn tại -> bỏ qua")
+
+                # back ra
+                click_image_in_region("images/back_button.png", window=window, region_ratio=region_ratio)
+                time.sleep(1)
+
+            # --- Nếu không có thiết bị mới nào thì dừng vòng lặp ---
+            if not found_new:
+                print("[INFO] Không còn thiết bị mới, dừng vòng lặp.")
+                break
+
+            # scroll xuống hết vùng quét để tìm thêm
+            pyautogui.moveTo(region_abs[0] + region_abs[2] // 2,
+                            region_abs[1] + region_abs[3] // 2)
+            pyautogui.scroll(-region_abs[3])
+            time.sleep(1)
+
+        print(f"[INFO] Danh sách thiết bị copy được: {all_names}")
+
+        if not all_names:
+            print("[WARN] Không lấy được thiết bị nào")
+            return None
+
+        # --- Tìm số nhỏ nhất chưa tồn tại ---
+        prefix = None
+        numbers = []
+        for name in all_names:
+            if "-" in name:
+                parts = name.split("-")
+                prefix = parts[0].upper()
+                try:
+                    num = int(parts[1])
+                    numbers.append(num)
+                except:
+                    pass
+
+        if not prefix:
+            print("[ERROR] Không tìm thấy prefix hợp lệ trong danh sách")
+            return None
+
+        numbers = sorted(set(numbers))
+        new_number = 1
+        for n in numbers:
+            if n == new_number:
+                new_number += 1
+            elif n > new_number:
+                break
+
+        new_device_name = f"{prefix}-{new_number}"
+        pyperclip.copy(new_device_name)
+        print(f"[INFO] Sinh tên thiết bị mới: {new_device_name} (đã copy vào clipboard)")
+
+        return new_device_name
 
 
