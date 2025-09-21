@@ -542,6 +542,27 @@ app.patch("/rentals/:id/reject-extend", authMiddleware, (req, res) => {
   );
 });
 
+app.patch("/rentals/:id", authMiddleware, (req, res) => {
+  const { id } = req.params;
+  const { status, tabs } = req.body;
+
+  // validate
+  if (status === "pending_change_tab" && (!tabs || tabs <= 0)) {
+    return res.status(400).json({ message: "Số tab phải > 0" });
+  }
+
+  db.run(
+    `UPDATE rentals 
+     SET status = COALESCE(?, status), 
+         tabs   = COALESCE(?, tabs) 
+     WHERE id = ?`,
+    [status, tabs, id],
+    function (err) {
+      if (err) return res.status(500).json({ message: "DB error" });
+      res.json({ message: "Cập nhật thành công", rentalId: id });
+    }
+  );
+});
 
 // ====== API cho admin lấy WORKER_API hiện tại ======
 app.get("/admin/worker", authMiddleware, (req, res) => {
