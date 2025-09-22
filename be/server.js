@@ -385,7 +385,7 @@ app.post("/rentals/:id/extend", (req, res) => {
 
 app.patch("/rentals/:id", authMiddleware, (req, res) => {
   const { id } = req.params;
-  const { status, roomCode, rentalTime } = req.body;
+  const { status, roomCode, rentalTime, action } = req.body;
 
   db.get(`SELECT * FROM rentals WHERE id=?`, [id], (err, rental) => {
     if (err) return res.status(500).json({ message: "DB error" });
@@ -395,9 +395,61 @@ app.patch("/rentals/:id", authMiddleware, (req, res) => {
     const newRentalTime = rentalTime ?? rental.rentalTime;
     const newRoomCode = roomCode ?? rental.roomCode;
 
-    // Nếu status được cập nhật sang active và chưa có roomCode
+    // ✅ Trường hợp xác nhận đổi tab
+    if (
+      rental.status === "pending_change_tab" &&
+      newStatus === "active" &&
+      action === "confirm_change_tab"
+    ) {
+      console.log(`[INFO] Xác nhận đổi tab cho rentalId=${id}, roomCode=${rental.roomCode}`);
+      axios
+        .post(`${WORKER_API}/command`, {
+          action: "change_devide",
+          userId: rental.userId,
+          rentalId: id,
+          roomCode: rental.roomCode,
+        })
+        .then(() => {
+          db.run(
+            `UPDATE rentals SET status='active', rentalTime=? WHERE id=?`,
+            [newRentalTime, id],
+            () =>
+              res.json({
+                message: "Đã gửi change_devide cho worker",
+                rentalId: id,
+              })
+          );
+        })
+        .catch((e) =>
+          res
+            .status(500)
+            .json({ message: "Worker API error", error: e.message })
+        );
+
+      return;
+    }
+
+    // ✅ Trường hợp hủy yêu cầu đổi tab
+    if (
+      rental.status === "pending_change_tab" &&
+      newStatus === "active" &&
+      action === "cancel_change_tab"
+    ) {
+      console.log(`[INFO] Hủy yêu cầu đổi tab rentalId=${id}`);
+      db.run(
+        `UPDATE rentals SET status='active', rentalTime=? WHERE id=?`,
+        [newRentalTime, id],
+        () =>
+          res.json({
+            message: "Đã hủy yêu cầu đổi tab, quay lại active",
+            rentalId: id,
+          })
+      );
+      return;
+    }
+
+    // ✅ Case cũ: kích hoạt rental mới
     if (newStatus === "active" && !newRoomCode) {
-      // Check user có rental active khác chưa
       db.get(
         `SELECT * FROM rentals WHERE userId=? AND status='active' AND id!=?`,
         [rental.userId, id],
@@ -405,56 +457,78 @@ app.patch("/rentals/:id", authMiddleware, (req, res) => {
           if (err2) return res.status(500).json({ message: "DB error" });
 
           if (activeRental) {
-            // Đã có rental active, gọi worker extend_room
+            // extend_room
             console.log(`[INFO] User ${rental.userId} đã có rental active, gửi extend_room`);
-            axios.post(`${WORKER_API}/command`, {
-              action: "extend_room",
-              userId: rental.userId,
-              rentalId: id,
-              rentalTime: newRentalTime,
-              roomCode: activeRental.roomCode
-            }).then(() => {
-              db.run(
-                `UPDATE rentals SET status='active', rentalTime=? WHERE id=?`,
-                [newRentalTime, id],
-                () => res.json({ message: "Đã gửi extend_room cho worker", rentalId: id })
+            axios
+              .post(`${WORKER_API}/command`, {
+                action: "extend_room",
+                userId: rental.userId,
+                rentalId: id,
+                rentalTime: newRentalTime,
+                roomCode: activeRental.roomCode,
+              })
+              .then(() => {
+                db.run(
+                  `UPDATE rentals SET status='active', rentalTime=? WHERE id=?`,
+                  [newRentalTime, id],
+                  () =>
+                    res.json({
+                      message: "Đã gửi extend_room cho worker",
+                      rentalId: id,
+                    })
+                );
+              })
+              .catch((e) =>
+                res
+                  .status(500)
+                  .json({ message: "Worker API error", error: e.message })
               );
-            }).catch((e) => res.status(500).json({ message: "Worker API error", error: e.message }));
-
           } else {
-            // Chưa có rental active, tạo room mới
-            axios.post(`${WORKER_API}/command`, {
-              action: "create_room",
-              userId: rental.userId,
-              rentalId: id,
-              rentalTime: newRentalTime
-            }).then(() => {
-              db.run(
-                `UPDATE rentals SET status='active', rentalTime=? WHERE id=?`,
-                [newRentalTime, id],
-                () => res.json({ message: "Đã gửi create_room cho worker", rentalId: id })
+            // create_room
+            axios
+              .post(`${WORKER_API}/command`, {
+                action: "create_room",
+                userId: rental.userId,
+                rentalId: id,
+                rentalTime: newRentalTime,
+              })
+              .then(() => {
+                db.run(
+                  `UPDATE rentals SET status='active', rentalTime=? WHERE id=?`,
+                  [newRentalTime, id],
+                  () =>
+                    res.json({
+                      message: "Đã gửi create_room cho worker",
+                      rentalId: id,
+                    })
+                );
+              })
+              .catch((e) =>
+                res
+                  .status(500)
+                  .json({ message: "Worker API error", error: e.message })
               );
-            }).catch((e) => res.status(500).json({ message: "Worker API error", error: e.message }));
           }
         }
       );
-
-    } else {
-      // Cập nhật thông thường, không liên quan worker
-      db.run(
-        `UPDATE rentals SET status=?, rentalTime=?, roomCode=? WHERE id=?`,
-        [newStatus, newRentalTime, newRoomCode, id],
-        function (err3) {
-          if (err3) return res.status(500).json({ message: "DB error" });
-          db.get(`SELECT * FROM rentals WHERE id=?`, [id], (err4, updated) => {
-            if (err4) return res.status(500).json({ message: "DB error" });
-            res.json({ message: "Rental updated", rental: updated });
-          });
-        }
-      );
+      return;
     }
+
+    // ✅ Update thông thường
+    db.run(
+      `UPDATE rentals SET status=?, rentalTime=?, roomCode=? WHERE id=?`,
+      [newStatus, newRentalTime, newRoomCode, id],
+      function (err3) {
+        if (err3) return res.status(500).json({ message: "DB error" });
+        db.get(`SELECT * FROM rentals WHERE id=?`, [id], (err4, updated) => {
+          if (err4) return res.status(500).json({ message: "DB error" });
+          res.json({ message: "Rental updated", rental: updated });
+        });
+      }
+    );
   });
 });
+
 
 app.delete("/rentals/:id", (req, res) => {
   const { id } = req.params;
@@ -538,28 +612,6 @@ app.patch("/rentals/:id/reject-extend", authMiddleware, (req, res) => {
     function (err) {
       if (err) return res.status(500).json({ message: "DB error" });
       res.json({ message: "Đã từ chối gia hạn", rentalId: id });
-    }
-  );
-});
-
-app.patch("/rentals/:id", authMiddleware, (req, res) => {
-  const { id } = req.params;
-  const { status, tabs } = req.body;
-
-  // validate
-  if (status === "pending_change_tab" && (!tabs || tabs <= 0)) {
-    return res.status(400).json({ message: "Số tab phải > 0" });
-  }
-
-  db.run(
-    `UPDATE rentals 
-     SET status = COALESCE(?, status), 
-         tabs   = COALESCE(?, tabs) 
-     WHERE id = ?`,
-    [status, tabs, id],
-    function (err) {
-      if (err) return res.status(500).json({ message: "DB error" });
-      res.json({ message: "Cập nhật thành công", rentalId: id });
     }
   );
 });
