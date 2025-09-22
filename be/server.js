@@ -648,6 +648,42 @@ app.patch("/admin/worker", authMiddleware, (req, res) => {
     res.json({ message: "WORKER_API updated", WORKER_API });
   });
 });
+
+app.get("/api/room-groups", authMiddleware, (req, res) => {
+  db.all(
+    `SELECT roomCode, status 
+     FROM rentals 
+     WHERE status='active'`,
+    [],
+    (err, rows) => {
+      if (err) {
+        console.error("DB error:", err);
+        return res.status(500).json({ error: "Database error" });
+      }
+
+      if (!rows || rows.length === 0) {
+        return res.json([]);
+      }
+
+      const groups = {};
+      for (const row of rows) {
+        const parts = row.roomCode.split(" ");
+        if (parts.length >= 3) {
+          const groupKey = parts[2]; // lấy chuỗi thứ 3
+          if (!groups[groupKey]) {
+            groups[groupKey] = { group: groupKey, count: 0, rooms: [] };
+          }
+          groups[groupKey].count++;
+          groups[groupKey].rooms.push(row.roomCode);
+        }
+      }
+
+      res.json(Object.values(groups));
+    }
+  );
+});
+
+
 // ====== Background auto-expire (mỗi 24h) ======
 setInterval(() => {
   const nowSql = toSqlDateTime(new Date());
