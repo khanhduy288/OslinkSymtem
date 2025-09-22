@@ -652,8 +652,7 @@ app.patch("/admin/worker", authMiddleware, (req, res) => {
 app.get("/api/room-groups", authMiddleware, (req, res) => {
   db.all(
     `SELECT roomCode, status 
-     FROM rentals 
-     WHERE status='active'`,
+     FROM rentals`,
     [],
     (err, rows) => {
       if (err) {
@@ -671,14 +670,29 @@ app.get("/api/room-groups", authMiddleware, (req, res) => {
         if (parts.length >= 3) {
           const groupKey = parts[2]; // lấy chuỗi thứ 3
           if (!groups[groupKey]) {
-            groups[groupKey] = { group: groupKey, count: 0, rooms: [] };
+            groups[groupKey] = { 
+              group: groupKey, 
+              rooms: [], 
+              statuses: [] 
+            };
           }
-          groups[groupKey].count++;
           groups[groupKey].rooms.push(row.roomCode);
+          groups[groupKey].statuses.push(row.status);
         }
       }
 
-      res.json(Object.values(groups));
+      // Check nhóm hết hạn hay còn hạn
+      const result = Object.values(groups).map(g => {
+        const allExpired = g.statuses.every(s => s === "expired");
+        return {
+          group: g.group,
+          count: g.rooms.length,
+          rooms: g.rooms,
+          expired: allExpired
+        };
+      });
+
+      res.json(result);
     }
   );
 });
