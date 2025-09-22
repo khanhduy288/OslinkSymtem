@@ -648,7 +648,7 @@ app.patch("/admin/worker", authMiddleware, (req, res) => {
     res.json({ message: "WORKER_API updated", WORKER_API });
   });
 });
-// ====== Background auto-expire (mỗi 60s) ======
+// ====== Background auto-expire (mỗi 24h) ======
 setInterval(() => {
   const nowSql = toSqlDateTime(new Date());
   db.all(
@@ -659,15 +659,21 @@ setInterval(() => {
       for (const rental of rows) {
         console.log("⚠️ Quá hạn, auto-close:", rental.id, rental.roomCode);
         try {
-          await runAutomation("close_room", [String(rental.roomCode || "")]);
-          db.run(`UPDATE rentals SET status='expired' WHERE id=?`, [rental.id]);
+          await axios.post(`${WORKER_API}/command`, {
+            action: "close_room",
+            userId: rental.userId,
+            rentalId: rental.id,
+            roomCode: rental.roomCode,
+          });
+          console.log(`[INFO] Queued close_room for rentalId=${rental.id}`);
         } catch (e) {
-          console.error("Auto-close error:", e.message);
+          console.error("Auto-close error (send to worker):", e.message);
         }
       }
     }
   );
-},24 * 60 * 60 * 1000);
+}, 24 * 60 * 60 * 1000);
+
 
 // ====== Start ======
 app.listen(PORT, () => {
