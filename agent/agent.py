@@ -820,12 +820,6 @@ def run_action(action, room_name=None, **kwargs):
                     click_image_in_region("images/kickroom.png", window=window, region_ratio=region_ratio)
                     time.sleep(3)
 
-                    # Quay lại màn hình chính
-                    click_image_in_region("images/back1.png", window=window, region_ratio=[0,0,1,1])
-                    time.sleep(1)
-                    click_image_in_region("images/ldplay.png", window=window, region_ratio=[0,0,1,1])
-                    time.sleep(1)
-
                     found_new = True
                     break
                 else:
@@ -842,6 +836,42 @@ def run_action(action, room_name=None, **kwargs):
 
         print(f"[INFO] Danh sách thiết bị copy được: {copied_names}")
         return list(copied_names)
+
+    elif action_type == "check_and_giai_tan":
+        image_check = action.get("image")  # ví dụ: "images/check3.png"
+        window_name = action.get("window")
+        region_ratio = action.get("region_ratio")
+        threshold = float(action.get("threshold", 0.75))
+
+        # Chuyển region_ratio -> pixel
+        region = None
+        if window_name and region_ratio:
+            win_rect = window_rect_abs(window_name)
+            if win_rect:
+                region = ratio_region_to_abs(win_rect, region_ratio)
+
+        # Kiểm tra ảnh
+        center, score = find_image_opencv(image_check, region=region, threshold=threshold)
+        if center:
+            print(f"[INFO] Icon {image_check} tồn tại (score={score:.2f}), sẽ giai tan room...")
+            # Click menu3.png
+            click_image_in_region("images/menu3.png", window=window_name)
+            time.sleep(3)
+            # Click giaitanroom.png
+            click_image_in_region("images/giaitan3.png", window=window_name)
+            time.sleep(3)
+            click_image_in_region("images/xacnhan3.png", window=window_name)
+            time.sleep(3)
+            click_image_in_region("images/huy1.png", window=window_name)
+            time.sleep(3)
+            print("[INFO] Room đã được giải tán")
+        else:
+            time.sleep(3)
+            click_image_in_region("images/back1.png", window=window_name)
+            time.sleep(3)
+            click_image_in_region("images/huy1.png", window=window_name)
+            time.sleep(3)
+        return None
 
 
     elif action_type == "click_bottom_icon_only":
@@ -1498,12 +1528,17 @@ def worker():
             elif action == "change_devide":
                 room_code = extra
                 print(f"[INFO] Worker change_devide roomCode={room_code}, userId={userId}")
-                run_script("change_devide.json", room_name=room_code)
 
-            else:
-                print(f"[WARN] Unknown worker action: {action}")
+                codenew = run_change_devide_tool(room_code)
+                if codenew:
+                    payload = {"status": "active", "roomCode": codenew}
+                    print(f"[DEBUG] PATCH body gửi lên BE: {payload}")
+                    res = http_patch(f"{BACKEND_API}/rentals/{rentalId}", json=payload)
+                    if res:
+                        print(f"[INFO] PATCH rentalId={rentalId}, status={res.status_code}, resp={res.text}")
+                else:
+                    print(f"[WARN] Change_devide thất bại, rentalId={rentalId} vẫn pending_change_tab")
 
-            request_queue.task_done()
 
         except Exception as e:
             print(f"[WORKER][ERROR] {e}")
