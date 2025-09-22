@@ -27,7 +27,7 @@ ROOMS = {}  # userId -> {'room_code':..., 'end_time':...}
 JSON_PATH = "close_room.json"
 ADMIN_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwibGV2ZWwiOjEwMCwiaWF0IjoxNzU4MzA2MzQ2LCJleHAiOjE3NTg5MTExNDZ9.X0D-2uuv_rw2SpvJZjIUkHvXDnhQufLzKWRH2-LAv9o"
 # --- ĐƯỜNG DẪN TESSERACT --- (ưu tiên ENV, fallback đường dẫn cứng)
-tesseract_path = os.getenv("TESSERACT_PATH", r"C:\project12m\OslinkSymtem\tessat\tesseract.exe")
+tesseract_path = os.getenv("TESSERACT_PATH", r"D:\project12m\OslinkSymtem\tessat\tesseract.exe")
 pytesseract.pytesseract.tesseract_cmd = tesseract_path
 
 # --- Biến toàn cục lưu tên thiết bị đã copy ---
@@ -724,7 +724,7 @@ def run_action(action, room_name=None, **kwargs):
             return None
 
         # Lấy thiết bị cần xóa từ phần thứ 3
-        device_to_delete_raw = parts[2].upper()
+        device_to_delete_raw = parts[1].upper()
         if "-" in device_to_delete_raw:
             prefix, num = device_to_delete_raw.split("-")
             try:
@@ -991,7 +991,7 @@ def run_action(action, room_name=None, **kwargs):
         if room_name:
             parts = room_name.split()
             if len(parts) >= 3:
-                target_text = parts[2]
+                target_text = parts[1]
         if not target_text:
             print("[WARN] Không lấy được target_text từ room_name")
             return None
@@ -1045,10 +1045,10 @@ def run_action(action, room_name=None, **kwargs):
                 crop_img = screenshot_cv[y1:y2, x1:x2]
 
                 # debug: vẽ khung xanh để check
-                debug_img = screenshot_cv.copy()
-                cv2.rectangle(debug_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.imwrite(f"debug_box_{target_text}_{scroll_count}_{idx}.png", debug_img)
-                cv2.imwrite(f"debug_crop_{target_text}_{scroll_count}_{idx}.png", crop_img)
+                # debug_img = screenshot_cv.copy()
+                # cv2.rectangle(debug_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                # cv2.imwrite(f"debug_box_{target_text}_{scroll_count}_{idx}.png", debug_img)
+                # cv2.imwrite(f"debug_crop_{target_text}_{scroll_count}_{idx}.png", crop_img)
 
                 # Resize + threshold
                 scale = 3
@@ -1339,16 +1339,17 @@ def run_remove_group_tool(roomCode: str):
 def run_change_devide_tool(roomCode: str):
     """
     Đổi thiết bị trong room theo roomCode.
-    Trả True/False, KHÔNG dựa vào text trả về.
+    Trả về roomCode mới nếu thành công, None nếu thất bại.
     """
     print(f"[TOOL] Change devide cho roomCode={roomCode}")
     try:
-        _ = run_script("change_devide.json", room_name=roomCode)
-        print(f"[INFO] Change devide {roomCode} thành công")
-        return True
+        codenew = run_script("change_devide.json", room_name=roomCode)
+        print(f"[INFO] Change devide {roomCode} thành công, codenew={codenew}")
+        return codenew
     except Exception as e:
         print(f"[ERROR] Change devide {roomCode} thất bại: {e}")
-        return False
+        return None
+
 
 
 def schedule_room_close(userId, rentalTime):
