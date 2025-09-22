@@ -4,6 +4,8 @@
   { "type": "wait", "seconds": 2 },
   { "type": "click", "image": "images/logooslink.png" },
   { "type": "wait", "seconds": 3 },
+  { "type": "click", "image": "images/ldplay1.png" },
+  { "type": "wait", "seconds": 3 },
   { "type": "click_window", "window": "LDPlayer", "rel_x": 0.025, "rel_y": 0.106 },
   { "type": "wait", "seconds": 3 },
   { "type": "scroll_down_max" },
