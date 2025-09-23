@@ -321,7 +321,6 @@ def run_action(action, room_name=None, **kwargs):
         window_title = action.get("window", "LDPlayer")
         region_ratio = action.get("region_ratio")  # [rel_x, rel_y, rel_w, rel_h]
 
-        # Lấy room_code từ kwargs (đúng với key truyền từ run_script)
         room_code = room_name
         print(f"[DEBUG] click_server nhận room_code: {room_name}")
 
@@ -353,6 +352,44 @@ def run_action(action, room_name=None, **kwargs):
             pyautogui.press("enter")
         else:
             print(f"[WARN] Không tìm thấy server {server_letter}")
+
+    elif action_type == "click_server_name":
+        window_title = action.get("window", "LDPlayer")
+        server_name = action.get("server_name")
+
+        # Dùng region cố định
+        region_ratio = [0.009, 0.081, 0.123, 0.339]
+
+        if not server_name:
+            print("[ERROR] Thiếu server_name cho click_server_name")
+            return
+
+        # Lấy rect cửa sổ
+        win_rect = window_rect_abs(window_title)
+        if not win_rect:
+            print(f"[ERROR] Không lấy được rect cho window '{window_title}'")
+            return
+
+        # Chuyển region_ratio thành tọa độ tuyệt đối
+        x, y, w, h = ratio_region_to_abs(win_rect, region_ratio)
+
+        # Chụp ảnh vùng này
+        screenshot = pyautogui.screenshot(region=(x, y, w, h))
+
+        # Tìm vị trí server_name trong ảnh
+        coords = find_text_in_image(screenshot, server_name)
+        if coords:
+            abs_x = x + coords[0]
+            abs_y = y + coords[1]
+            pyautogui.click(abs_x, abs_y)
+            print(f"[INFO] Click server {server_name} tại ({abs_x},{abs_y})")
+            time.sleep(1)
+            # Nếu cần gõ thêm enter
+            pyautogui.press("enter")
+        else:
+            print(f"[WARN] Không tìm thấy server {server_name} trong vùng")
+
+
 
     elif action_type == "click_region":
         image_path = action.get("image")
@@ -1635,15 +1672,25 @@ def get_actions():
     with open(ACTIONS_FILE, "r", encoding="utf-8") as f:
         actions = json.load(f)
     return jsonify(actions)
-
 @app.route("/actions", methods=["POST"])
 def save_actions():
     try:
         data = request.get_json(force=True)
         if not isinstance(data, list):
             return jsonify({"error": "actions must be a JSON array"}), 400
+
+        def one_line_json(obj):
+            return json.dumps(obj, ensure_ascii=False, separators=(", ", ": "))
+
         with open(ACTIONS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write("[\n")
+            for i, action in enumerate(data):
+                line = "  " + one_line_json(action)
+                if i < len(data) - 1:
+                    line += ","
+                f.write(line + "\n")
+            f.write("]\n")
+
         return jsonify({"status": "ok"})
     except Exception as e:
         return jsonify({"error": str(e)}), 400
