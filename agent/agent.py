@@ -382,24 +382,31 @@ def run_action(action, room_name=None, **kwargs):
                 print(f"[WARN] Không tìm thấy {image_path} trong '{window}', best_score={score:.2f}")
         return None
 
-    elif action_type == "ocr_copy_window":
-        window = action.get("window", "LDPlayer")
-        region_ratio = action.get("region_ratio")
-        rect = window_rect_abs(window)
-        if rect:
-            try:
-                region_abs = ratio_region_to_abs(rect, region_ratio)
-                screenshot = pyautogui.screenshot(region=region_abs)
-                text = pytesseract.image_to_string(screenshot, config="--psm 6").strip()
-                if text:
-                    pyperclip.copy(text)
-                    print(f"[INFO] OCR (in '{window}') copied: {text}")
-                    return text
-                else:
-                    print("[WARN] OCR không nhận được text nào.")
-            except Exception as e:
-                print(f"[ERROR] OCR lỗi: {e}")
-        return None
+    elif action_type == "ocr_copy":
+        # region_ratio: [x_ratio, y_ratio, w_ratio, h_ratio] tương đối so với cửa sổ
+        region_ratio = action.get("region")
+        if not region_ratio:
+            print("[WARN] Thiếu region cho 'ocr_copy'")
+            return None
+
+        win_rect = window_rect_abs("LDPlayer")
+        if not win_rect:
+            print("[WARN] Không tìm thấy cửa sổ LDPlayer")
+            return None
+
+        try:
+            abs_region = ratio_region_to_abs(win_rect, region_ratio)
+            screenshot = pyautogui.screenshot(region=abs_region)
+            text = pytesseract.image_to_string(screenshot, config="--psm 6").strip()
+            if text:
+                print(f"[INFO] OCR result: {text}")
+                return text   # chỉ return, không copy
+            else:
+                print("[WARN] OCR không nhận được text nào.")
+                return None
+        except Exception as e:
+            print(f"[ERROR] Lỗi OCR: {e}")
+            return None
 
     elif action_type == "click_min_number":
         window = action.get("window", "LDPlayer")

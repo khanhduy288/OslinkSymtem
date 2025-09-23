@@ -57,7 +57,7 @@
   { "type": "wait", "seconds": 3 },  
   { "type": "click_window", "window": "LDPlayer", "rel_x": 0.178, "rel_y": 0.297 },
   { "type": "wait", "seconds": 3 },  
-  { "type": "ocr_copy", "region": [710, 65, 70, 28]},
+  { "type": "ocr_copy", "region": [0.055, 0.054, 0.175, 0.029] },
   { "type": "wait", "seconds": 2 },
   { "type": "click", "image": "images/adddevice.png" },
   { "type": "wait", "seconds": 3 },
