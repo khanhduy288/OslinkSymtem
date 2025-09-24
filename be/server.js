@@ -10,7 +10,7 @@ const jwt = require("jsonwebtoken");
 const app = express();
 const PORT = 5000;
 const SECRET_KEY = "mysecretkey123"; // đổi thành key mạnh hơn trong production
-
+const ADMIN_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwibGV2ZWwiOjEwMCwiaWF0IjoxNzU4MzA2MzQ2LCJleHAiOjE3NTg5MTExNDZ9.X0D-2uuv_rw2SpvJZjIUkHvXDnhQufLzKWRH2-LAv9o";
 app.use(cors({
   origin: "*",  // hoặc chỉ định frontend domain
   methods: ["GET","POST","PATCH","DELETE","OPTIONS"],
@@ -111,6 +111,17 @@ function toSqlDateTime(d) {
     ":" +
     pad(d.getSeconds())
   );
+}
+
+function adminAuth(req, res, next) {
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.split(" ")[1];
+
+  if (!token || token !== ADMIN_TOKEN) {
+    return res.status(401).json({ message: "Unauthorized" });
+  }
+
+  next();
 }
 
 function authMiddleware(req, res, next) {
@@ -273,20 +284,33 @@ app.get("/rentals", authMiddleware, (req, res) => {
 });
 
 // API cho admin
-app.get("/admin/rentals", authMiddleware, (req, res) => {
-  if (req.user.level < 10) return res.status(403).json({ message: "Không đủ quyền" });
-  db.all(
-    `SELECT rentals.*, users.username 
-     FROM rentals 
-     JOIN users ON rentals.userId = users.id 
-     ORDER BY datetime(rentals.createdAt) DESC`,
-    [],
-    (err, rows) => {
-      if (err) return res.status(500).json({ message: err.message });
-      res.json(rows);
-    }
-  );
+app.get("/admin/rentals", adminAuth, (req, res) => {
+  const { userId, _sort, _order, _limit } = req.query;
+
+  let sql = `SELECT rentals.*, users.username 
+             FROM rentals 
+             JOIN users ON rentals.userId = users.id`;
+  const params = [];
+
+  if (userId) {
+    sql += " WHERE rentals.userId=?";
+    params.push(userId);
+  }
+
+  if (_sort) {
+    sql += ` ORDER BY ${_sort} ${_order && _order.toUpperCase() === "DESC" ? "DESC" : "ASC"}`;
+  }
+
+  if (_limit) {
+    sql += ` LIMIT ${parseInt(_limit)}`;
+  }
+
+  db.all(sql, params, (err, rows) => {
+    if (err) return res.status(500).json({ message: err.message });
+    res.json(rows);
+  });
 });
+
 
 app.get("/rentals/:id", (req, res) => {
   db.get(`SELECT * FROM rentals WHERE id=?`, [req.params.id], (err, row) => {
