@@ -27,7 +27,7 @@ ROOMS = {}  # userId -> {'room_code':..., 'end_time':...}
 JSON_PATH = "close_room.json"
 ADMIN_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwibGV2ZWwiOjEwMCwiaWF0IjoxNzU4MzA2MzQ2LCJleHAiOjE3NTg5MTExNDZ9.X0D-2uuv_rw2SpvJZjIUkHvXDnhQufLzKWRH2-LAv9o"
 # --- ĐƯỜNG DẪN TESSERACT --- (ưu tiên ENV, fallback đường dẫn cứng)
-tesseract_path = os.getenv("TESSERACT_PATH", r"D:\project12m\OslinkSymtem\tessat\tesseract.exe")
+tesseract_path = os.getenv("TESSERACT_PATH", r"C:\project12m\OslinkSymtem\tessat\tesseract.exe")
 pytesseract.pytesseract.tesseract_cmd = tesseract_path
 
 # --- Biến toàn cục lưu tên thiết bị đã copy ---
@@ -1132,7 +1132,7 @@ def run_action(action, room_name=None, **kwargs):
                     gray, 0, 255,
                     cv2.THRESH_BINARY + cv2.THRESH_OTSU
                 )
-                cv2.imwrite(f"debug_crop_thresh_{target_text}_{scroll_count}_{idx}.png", thresh)
+                # cv2.imwrite(f"debug_crop_thresh_{target_text}_{scroll_count}_{idx}.png", thresh)
 
                 # OCR
                 text = pytesseract.image_to_string(
