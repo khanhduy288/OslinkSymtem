@@ -27,7 +27,7 @@ ROOMS = {}  # userId -> {'room_code':..., 'end_time':...}
 JSON_PATH = "close_room.json"
 ADMIN_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwibGV2ZWwiOjEwMCwiaWF0IjoxNzU4MzA2MzQ2LCJleHAiOjE3NTg5MTExNDZ9.X0D-2uuv_rw2SpvJZjIUkHvXDnhQufLzKWRH2-LAv9o"
 # --- ĐƯỜNG DẪN TESSERACT --- (ưu tiên ENV, fallback đường dẫn cứng)
-tesseract_path = os.getenv("TESSERACT_PATH", r"D:\project12m\OslinkSymtem\tessat\tesseract.exe")
+tesseract_path = os.getenv("TESSERACT_PATH", r"D:\OSlinkaction\OslinkSymtem\tessat\tesseract.exe")
 pytesseract.pytesseract.tesseract_cmd = tesseract_path
 
 # --- Biến toàn cục lưu tên thiết bị đã copy ---
@@ -76,14 +76,15 @@ def http_patch(url, json=None, token=None, **kwargs):
         print(f"[HTTP][PATCH] {url} error: {e}, payload={json}")
         return None
 
-def get_latest_roomcode(userId):
+def get_latest_roomcode(userId, token=None):
     url = f"{BACKEND_API}/rentals?userId={userId}&_sort=createdAt&_order=desc&_limit=1"
-    res = http_get(url)
+    res = http_get(url, token=token)
     if res and res.status_code == 200:
         data = res.json()
         if data:
             return data[0].get("roomCode")
     return None
+
 
 def click_image_in_region(image_path, threshold=0.75, window=None, region_ratio=None):
     region = None
@@ -646,9 +647,9 @@ def run_action(action, room_name=None, **kwargs):
         no_new_rounds = 0
         ocr_config = "--oem 3 --psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
 
-        for scroll_round in range(MAX_SCROLL):
+        scroll_round = 0
+        while scroll_round < MAX_SCROLL:
             print(f"[DEBUG] ===== Scroll round {scroll_round} =====")
-
             new_found = False
 
             # OCR 2 lần mỗi vòng
@@ -691,13 +692,53 @@ def run_action(action, room_name=None, **kwargs):
                     no_new_rounds = 0
 
                 if no_new_rounds >= 3:
-                    print("[DEBUG] Sau 3 vòng không có thiết bị mới, dừng quét.")
-                    break
+                    print("[DEBUG] Sau 3 vòng không có thiết bị mới, bắt đầu scroll ngược 20 vòng")
+                    for reverse_round in range(20):
+                        pyautogui.moveTo(win.centerx, win.centery)
+                        pyautogui.scroll(500)  # scroll ngược lên
+                        time.sleep(scroll_delay)
 
-            # Scroll xuống như trước
+                        # OCR mỗi vòng scroll ngược
+                        reverse_found = False
+                        for attempt in range(2):
+                            screenshot = pyautogui.screenshot(region=abs_region)
+                            gray = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2GRAY)
+                            _, bin_img = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
+                            img = cv2.resize(bin_img, (bin_img.shape[1]*IMG_SCALE, bin_img.shape[0]*IMG_SCALE), interpolation=cv2.INTER_LINEAR)
+
+                            text_data = pytesseract.image_to_data(
+                                img,
+                                output_type=pytesseract.Output.DICT,
+                                config=ocr_config
+                            )
+
+                            for i in range(len(text_data['text'])):
+                                raw_text = text_data['text'][i].strip().upper()
+                                raw_text = re.sub(r'\s+', '', raw_text)
+                                if not raw_text:
+                                    continue
+
+                                match = re.match(rf'({prefix})-?(\d{{1,2}})', raw_text)
+                                if match:
+                                    num = int(match.group(2).zfill(2))
+                                    if num not in all_numbers:
+                                        all_numbers.add(num)
+                                        reverse_found = True
+                                        print(f"[DEBUG-REVERSE] Thêm {prefix}-{str(num).zfill(2)} vào all_numbers")
+
+                            time.sleep(scan_delay)
+
+                        if reverse_found:
+                            print("[DEBUG-REVERSE] Đã tìm thêm thiết bị khi scroll ngược, dừng scroll ngược")
+                            break
+
+                    break  # dừng vòng chính sau scroll ngược
+
+            # Scroll xuống bình thường
             pyautogui.moveTo(win.centerx, win.centery)
             pyautogui.scroll(-500)
             time.sleep(scroll_delay)
+            scroll_round += 1
 
         if not all_numbers:
             print(f"[WARN] Không tìm thấy thiết bị nào với prefix {prefix}")
@@ -1469,8 +1510,8 @@ def worker():
                     print(f"[INFO] PATCH rentalId={rentalId}, status={res.status_code}, resp={res.text}")
 
             elif action == "extend_room":
-                # Ưu tiên roomCode từ request (extra), fallback BE
-                room_code = extra or get_latest_roomcode(userId)
+                # Ưu tiên roomCode từ request (extra), fallback BE dùng ADMIN_TOKEN
+                room_code = extra or get_latest_roomcode(userId, token=ADMIN_TOKEN)
                 if not room_code:
                     print(f"[ERROR] Không tìm thấy roomCode cho userId={userId}, không thể extend.")
                     request_queue.task_done()
@@ -1490,9 +1531,12 @@ def worker():
                     "rentalTime": rentalTime,
                     "status": "active"
                 }
-                res = http_patch(f"{BACKEND_API}/rentals/{rentalId}", json=payload)
+
+                # PATCH luôn dùng ADMIN_TOKEN
+                res = http_patch(f"{BACKEND_API}/rentals/{rentalId}", json=payload, token=ADMIN_TOKEN)
                 if res:
                     print(f"[INFO] PATCH rentalId={rentalId}, status={res.status_code}, resp={res.text}")
+
 
             elif action == "get_codenew":
                 userId = userId or "unknown"
