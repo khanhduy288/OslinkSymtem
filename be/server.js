@@ -6,11 +6,12 @@ const path = require("path");
 const axios = require('axios');
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-
+require('dotenv').config();
 const app = express();
 const PORT = 5000;
-const SECRET_KEY = "mysecretkey123"; // đổi thành key mạnh hơn trong production
-const ADMIN_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwibGV2ZWwiOjEwMCwiaWF0IjoxNzU4NzU4MDk4LCJleHAiOjE3OTAyOTQwOTh9.YrYcrfeMTWmNlBAqMWoK8GGmAFA2g9VLwpXNogwBtL0";
+const SECRET_KEY = process.env.SECRET_KEY;
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
+
 
 app.use(cors({
   origin: "*",  // hoặc chỉ định frontend domain
