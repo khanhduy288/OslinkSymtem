@@ -6,12 +6,12 @@ const path = require("path");
 const axios = require('axios');
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-require('dotenv').config();
+
 const app = express();
 const PORT = 5000;
+require('dotenv').config();
 const SECRET_KEY = process.env.SECRET_KEY;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
-
 
 app.use(cors({
   origin: "*",  // hoặc chỉ định frontend domain
@@ -1518,6 +1518,65 @@ app.delete("/revenues/:id", (req, res) => {
     }
     res.json({ message: `🗑️ Đã xóa bản ghi revenues có id = ${id}` });
   });
+});
+
+app.patch("/rentals/:id/compensate", adminAuth, async (req, res) => {
+  try {
+    const { compensateMinutes } = req.body;
+    const { id } = req.params;
+
+    if (!compensateMinutes || compensateMinutes <= 0) {
+      return res.status(400).json({ message: "compensateMinutes > 0" });
+    }
+
+    const rental = await new Promise((resolve, reject) => {
+      db.get(`SELECT * FROM rentals WHERE id = ?`, [id], (err, row) => {
+        if (err) reject(err);
+        else resolve(row);
+      });
+    });
+
+    if (!rental) {
+      return res.status(404).json({ message: "Rental không tồn tại" });
+    }
+
+    // ✅ CHỈ bù cho đơn active & còn hạn
+    if (
+      rental.status !== "active" ||
+      !rental.expiresAt ||
+      new Date(rental.expiresAt).getTime() <= Date.now()
+    ) {
+      return res.status(400).json({ message: "Đơn không còn hạn" });
+    }
+
+    const newExpiresAt = new Date(
+      new Date(rental.expiresAt).getTime() + compensateMinutes * 60000
+    ).toISOString();
+
+    await new Promise((resolve, reject) => {
+      db.run(
+        `UPDATE rentals SET expiresAt = ? WHERE id = ?`,
+        [newExpiresAt, id],
+        (err) => (err ? reject(err) : resolve())
+      );
+    });
+
+    // ✅ log lại hành động
+    addLog(
+      req.user?.id,
+      "Bù thời gian",
+      `Bù ${compensateMinutes} phút cho rental #${id}`
+    );
+
+    res.json({
+      success: true,
+      rentalId: id,
+      newExpiresAt,
+    });
+  } catch (err) {
+    console.error("❌ COMPENSATE ERROR:", err);
+    res.status(500).json({ message: "Server error", error: err.message });
+  }
 });
 
 
