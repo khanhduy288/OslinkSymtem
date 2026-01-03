@@ -199,13 +199,16 @@ function addMinutes(date, minutes) {
   return new Date(date.getTime() + minutes * 60000);
 }
 
-function addLog(userId, action, details = "") {
+function addLog(userId, action, details = "", extra = {}) {
+  const extraStr = Object.keys(extra).length
+    ? " | " + JSON.stringify(extra)
+    : "";
+
   if (!userId) {
-    // nếu không có userId (ví dụ admin), ghi lại "admin"
     db.run(
       `INSERT INTO logs (userId, username, action, details, createdAt)
        VALUES (NULL, 'admin', ?, ?, datetime('now', 'localtime'))`,
-      [action, details],
+      [action, details + extraStr],
       (err) => {
         if (err) console.error("[LOG ERROR]", err.message);
       }
@@ -213,19 +216,19 @@ function addLog(userId, action, details = "") {
     return;
   }
 
-  // nếu có userId → tự lấy username từ bảng users
   db.get(`SELECT username FROM users WHERE id = ?`, [userId], (err, row) => {
     const username = row?.username || "unknown";
     db.run(
       `INSERT INTO logs (userId, username, action, details, createdAt)
        VALUES (?, ?, ?, ?, datetime('now', 'localtime'))`,
-      [userId, username, action, details],
+      [userId, username, action, details + extraStr],
       (err2) => {
         if (err2) console.error("[LOG ERROR]", err2.message);
       }
     );
   });
 }
+
 
 async function addRevenue(rentalId, amount, type = "new_rental") {
   return new Promise((resolve, reject) => {
@@ -518,22 +521,26 @@ app.get("/rentals", authMiddleware, (req, res) => {
   );
 });
 
-// API cho admin
 app.get("/admin/rentals", adminAuth, (req, res) => {
   const { userId, _sort, _order, _limit } = req.query;
 
-  let sql = `SELECT rentals.*, users.username
-             FROM rentals
-             JOIN users ON rentals.userId = users.id`;
+  let sql = `
+    SELECT rentals.*,
+           users.username
+    FROM rentals
+    LEFT JOIN users ON rentals.userId = users.id
+  `;
   const params = [];
 
   if (userId) {
-    sql += " WHERE rentals.userId=?";
+    sql += " WHERE rentals.userId = ?";
     params.push(userId);
   }
 
   if (_sort) {
-    sql += ` ORDER BY ${_sort} ${_order && _order.toUpperCase() === "DESC" ? "DESC" : "ASC"}`;
+    sql += ` ORDER BY ${_sort} ${
+      _order && _order.toUpperCase() === "DESC" ? "DESC" : "ASC"
+    }`;
   }
 
   if (_limit) {
@@ -933,21 +940,30 @@ app.patch("/rentals/:id", authMiddleware, (req, res) => {
 });
 
 
-
-app.delete("/rentals/:id",authMiddleware, (req, res) => {
+app.delete("/rentals/:id", (req, res) => {
   const { id } = req.params;
 
-  db.run("DELETE FROM rentals WHERE id = ?", [id], function (err) {
+  // Lấy rental trước khi xóa
+  db.get("SELECT * FROM rentals WHERE id = ?", [id], (err, rental) => {
     if (err) return res.status(500).json({ message: "DB error" });
-    if (this.changes === 0) return res.status(404).json({ message: "Rental not found" });
+    if (!rental) return res.status(404).json({ message: "Rental not found" });
+
+    // Ghi log trước khi xóa
     addLog(
       req.user?.id,
       "Xóa đơn",
-      `Rental #${id} đã bị xóa khỏi hệ thống`
+      `Rental #${id} đã bị xóa khỏi hệ thống`,
+      { roomCode: rental.roomCode, tabs: rental.tabs }
     );
-    res.json({ message: "Rental deleted successfully" });
+
+    // Xóa rental
+    db.run("DELETE FROM rentals WHERE id = ?", [id], function (err2) {
+      if (err2) return res.status(500).json({ message: "DB error khi xóa" });
+      res.json({ message: "Rental deleted successfully" });
+    });
   });
 });
+
 
 app.delete("/admin/users/:id", authMiddleware, (req, res) => {
   // Chỉ admin level >= 10 mới được xóa
