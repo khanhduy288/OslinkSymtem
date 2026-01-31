@@ -167,6 +167,21 @@ db.run(`
   )
 `);
 
+// ================== RENTAL EXCEPTIONS ==================
+db.run(`
+  CREATE TABLE IF NOT EXISTS rental_exceptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    time DATETIME DEFAULT (datetime('now','localtime')),
+    customerName TEXT NOT NULL,
+    machineCount INTEGER NOT NULL,
+    price REAL NOT NULL,
+    totalAmount REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'rent', -- rent | stop
+    createdAt DATETIME DEFAULT (datetime('now','localtime'))
+  )
+`);
+
+
 db.run(`
   CREATE INDEX IF NOT EXISTS idx_voucher_code
   ON vouchers(code)
@@ -1079,7 +1094,6 @@ app.post("/rentals/:id/request-extend", authMiddleware, async (req, res) => {
   }
 });
 
-
 app.patch("/rentals/:id/confirm-extend", authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
@@ -1138,7 +1152,9 @@ app.patch("/rentals/:id/confirm-extend", authMiddleware, async (req, res) => {
 
         if (!used) {
           discountPercent = voucher.discount_percent || 0;
-          finalPrice = Math.round(finalPrice * (100 - discountPercent) / 100);
+          finalPrice = Math.round(
+            finalPrice * (100 - discountPercent) / 100
+          );
 
           await dbRun(
             "INSERT INTO voucher_usages (voucher_id, user_id) VALUES (?, ?)",
@@ -1164,6 +1180,20 @@ app.patch("/rentals/:id/confirm-extend", authMiddleware, async (req, res) => {
       [newExpiresAt, id]
     );
 
+    // ================== ✅ GHI DOANH THU (GIỐNG API CŨ) ==================
+    await dbRun(
+      `INSERT INTO revenues (rentalId, amount, type)
+       VALUES (?, ?, 'extend')`,
+      [id, finalPrice]
+    );
+
+    // ================== LOG ==================
+    addLog(
+      req.user?.id,
+      "Xác nhận gia hạn",
+      `Rental #${id} gia hạn ${extendMonths} tháng, doanh thu +${finalPrice}`
+    );
+
     res.json({
       message: "Gia hạn thành công",
       rentalId: id,
@@ -1176,6 +1206,7 @@ app.patch("/rentals/:id/confirm-extend", authMiddleware, async (req, res) => {
     res.status(500).json({ message: "Lỗi confirm extend" });
   }
 });
+
 
 app.patch("/rentals/:id/reject-extend", authMiddleware, async (req, res) => {
   if (req.user.role !== "admin") {
@@ -1567,6 +1598,195 @@ app.post("/vouchers/validate", authMiddleware, async (req, res) => {
   }
 });
 
+// ================== CREATE RENTAL EXCEPTION ==================
+// ================== CREATE RENTAL EXCEPTION ==================
+app.post("/admin/rental-exceptions", adminAuth, async (req, res) => {
+  try {
+    const {
+      customerName,
+      machineCount,
+      price,
+      rentType // month | week
+    } = req.body;
+
+    if (!customerName || !machineCount || !price || !rentType) {
+      return res.status(400).json({ message: "Thiếu dữ liệu" });
+    }
+
+    if (!["month", "week"].includes(rentType)) {
+      return res.status(400).json({ message: "rentType không hợp lệ" });
+    }
+
+    const totalAmount = Number(machineCount) * Number(price);
+
+    // 1️⃣ Insert rental exception
+    const result = await dbRun(
+      `
+      INSERT INTO rental_exceptions
+      (customerName, machineCount, price, rentType, totalAmount, status)
+      VALUES (?, ?, ?, ?, ?, 'rent')
+      `,
+      [customerName, machineCount, price, rentType, totalAmount]
+    );
+
+    const exceptionId = result.lastID;
+
+    // 2️⃣ Ghi doanh thu
+    await dbRun(
+      `
+      INSERT INTO revenues (rentalId, amount, type)
+      VALUES (?, ?, 'exception')
+      `,
+      [exceptionId, totalAmount]
+    );
+
+    // 3️⃣ Log
+    addLog(
+      req.user?.id,
+      "Tạo rental ngoại lệ",
+      `Khách=${customerName}, loại=${rentType}, máy=${machineCount}, tiền=${totalAmount}`
+    );
+
+    res.json({
+      message: "Tạo rental ngoại lệ thành công",
+      id: exceptionId,
+      totalAmount
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Lỗi tạo rental ngoại lệ" });
+  }
+});
+
+
+// ================== GET ALL RENTAL EXCEPTIONS ==================
+app.get("/admin/rental-exceptions", adminAuth, async (req, res) => {
+  try {
+    const rows = await dbAll(`
+      SELECT *
+      FROM rental_exceptions
+      ORDER BY createdAt DESC
+    `);
+
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Lỗi lấy danh sách rental ngoại lệ" });
+  }
+});
+
+
+// ================== GET RENTAL EXCEPTION BY ID ==================
+app.get("/admin/rental-exceptions/:id", adminAuth, async (req, res) => {
+  try {
+    const row = await dbGet(
+      `SELECT * FROM rental_exceptions WHERE id = ?`,
+      [req.params.id]
+    );
+
+    if (!row) {
+      return res.status(404).json({ message: "Không tìm thấy rental ngoại lệ" });
+    }
+
+    res.json(row);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Lỗi lấy rental ngoại lệ" });
+  }
+});
+
+
+// ================== UPDATE RENTAL EXCEPTION ==================
+// ================== UPDATE RENTAL EXCEPTION ==================
+app.patch("/admin/rental-exceptions/:id", adminAuth, async (req, res) => {
+  try {
+    const { customerName, machineCount, price, rentType, status } = req.body;
+
+    if (!customerName || !machineCount || !price || !rentType || !status) {
+      return res.status(400).json({ message: "Thiếu dữ liệu" });
+    }
+
+    if (!["month", "week"].includes(rentType)) {
+      return res.status(400).json({ message: "rentType không hợp lệ" });
+    }
+
+    if (!["rent", "stop"].includes(status)) {
+      return res.status(400).json({ message: "status không hợp lệ" });
+    }
+
+    const totalAmount = Number(machineCount) * Number(price);
+
+    await dbRun(
+      `
+      UPDATE rental_exceptions SET
+        customerName = ?,
+        machineCount = ?,
+        price = ?,
+        rentType = ?,
+        totalAmount = ?,
+        status = ?
+      WHERE id = ?
+      `,
+      [
+        customerName,
+        machineCount,
+        price,
+        rentType,
+        totalAmount,
+        status,
+        req.params.id
+      ]
+    );
+
+    addLog(
+      req.user?.id,
+      "Cập nhật rental ngoại lệ",
+      `ID=${req.params.id}, loại=${rentType}, trạng thái=${status}`
+    );
+
+    res.json({ message: "Cập nhật rental ngoại lệ thành công" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Lỗi cập nhật rental ngoại lệ" });
+  }
+});
+
+
+app.patch("/admin/rental-exceptions/:id/status", adminAuth, async (req, res) => {
+  const { status } = req.body;
+
+  if (!["rent", "stop"].includes(status)) {
+    return res.status(400).json({ message: "Status invalid" });
+  }
+
+  await dbRun(
+    `UPDATE rental_exceptions SET status=? WHERE id=?`,
+    [status, req.params.id]
+  );
+
+  res.json({ message: "Status updated", status });
+});
+
+// ================== DELETE RENTAL EXCEPTION ==================
+app.delete("/admin/rental-exceptions/:id", adminAuth, async (req, res) => {
+  try {
+    await dbRun(
+      `DELETE FROM rental_exceptions WHERE id = ?`,
+      [req.params.id]
+    );
+
+    addLog(
+      req.user?.id,
+      "Xóa rental ngoại lệ",
+      `ID=${req.params.id}`
+    );
+
+    res.json({ message: "Xóa rental ngoại lệ thành công" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Lỗi xóa rental ngoại lệ" });
+  }
+});
 
 
 
