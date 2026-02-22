@@ -1044,6 +1044,8 @@ app.post("/rentals/:id/request-extend", authMiddleware, async (req, res) => {
   }
 });
 
+// ================= CONFIRM EXTEND =================
+// ================= CONFIRM EXTEND (FIX FIRST EXTEND BUG) =================
 app.patch("/rentals/:id/confirm-extend", authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
@@ -1061,50 +1063,57 @@ app.patch("/rentals/:id/confirm-extend", authMiddleware, async (req, res) => {
       return res.status(400).json({ message: "Rental chưa có yêu cầu gia hạn" });
     }
 
-    // ===== PARSE TIME AN TOÀN SQLITE =====
+    // ===== PARSE SQLITE TIME (LOCAL – KHÔNG ÉP UTC) =====
     const parseSqliteTime = (str) => {
-      if (!str || typeof str !== "string") return null;
-      const ms = Date.parse(str.replace(" ", "T") + "Z");
+      if (!str) return null;
+      // 🔥 FIX: KHÔNG + "Z"
+      const ms = Date.parse(str.replace(" ", "T"));
       return isNaN(ms) ? null : ms;
     };
 
     const nowMs = Date.now();
     const expiresMs = parseSqliteTime(rental.expiresAt);
-    const createdMs = parseSqliteTime(rental.createdAt);
 
-    // 👉 nếu CHƯA từng gia hạn → dùng expiresAt
-    // 👉 nếu expiresAt null → fallback createdAt
-    // 👉 cuối cùng mới dùng now
+    // ===== LOGIC CHUẨN =====
+    // còn hạn → cộng tiếp từ expiresAt
+    // hết hạn → cộng từ now
     const baseMs =
-      (expiresMs && expiresMs > nowMs ? expiresMs : expiresMs) ||
-      createdMs ||
-      nowMs;
+      expiresMs && expiresMs > nowMs
+        ? expiresMs
+        : nowMs;
 
-    // ===== THỜI GIAN GIA HẠN =====
-    const extendMonths = Number(rental.requestedExtendMonths || 1);
+    // ===== DỮ LIỆU GIA HẠN (ĐÃ LƯU TỪ FE) =====
+    const months = Number(rental.requestedExtendMonths);
 
+    if (!months || months <= 0) {
+      return res.status(400).json({ message: "requestedExtendMonths invalid" });
+    }
+
+    // ===== QUY ĐỔI → PHÚT =====
     let extendMinutes = 0;
     let unitCount = 0;
 
-    if (extendMonths >= 1) {
+    if (months >= 1) {
       // gói tháng
-      extendMinutes = extendMonths * 30 * 24 * 60;
-      unitCount = extendMonths;
+      extendMinutes = months * 30 * 24 * 60;
+      unitCount = months;
     } else {
       // gói tuần (0.25 = 1 tuần)
-      const weeks = Math.round(extendMonths / 0.25);
+      const weeks = Math.round(months / 0.25);
       extendMinutes = weeks * 7 * 24 * 60;
       unitCount = weeks;
     }
 
-    const newExpiresAt = new Date(
-      baseMs + extendMinutes * 60 * 1000
-    )
+    // ===== TÍNH EXPIRES AT MỚI =====
+    const newExpiresAtMs =
+      baseMs + extendMinutes * 60 * 1000;
+
+    const newExpiresAt = new Date(newExpiresAtMs)
       .toISOString()
       .slice(0, 19)
       .replace("T", " ");
 
-    // ===== GIÁ =====
+    // ===== TÍNH GIÁ =====
     const pricePerTab = rental.pricePerTab || 150000;
     const tabCount = rental.tabs || 1;
 
@@ -1160,7 +1169,7 @@ app.patch("/rentals/:id/confirm-extend", authMiddleware, async (req, res) => {
       [newExpiresAt, id]
     );
 
-    // ===== GHI DOANH THU (KHÔNG NOTE) =====
+    // ===== DOANH THU =====
     await dbRun(
       `INSERT INTO revenues (rentalId, amount, type)
        VALUES (?, ?, 'extend')`,
@@ -1177,6 +1186,7 @@ app.patch("/rentals/:id/confirm-extend", authMiddleware, async (req, res) => {
     res.json({
       message: "Gia hạn thành công",
       rentalId: id,
+      oldExpiresAt: rental.expiresAt,
       newExpiresAt,
       finalPrice,
       discountPercent
@@ -1186,6 +1196,11 @@ app.patch("/rentals/:id/confirm-extend", authMiddleware, async (req, res) => {
     res.status(500).json({ message: "Lỗi confirm extend" });
   }
 });
+
+
+
+
+
 
 app.patch("/rentals/:id/reject-extend", authMiddleware, async (req, res) => {
   if (req.user.role !== "admin") {
