@@ -799,13 +799,14 @@ app.patch("/rentals/:id", authMiddleware, (req, res) => {
           roomCode: rental.roomCode,
         })
         .then(() => {
-          const expiresAtLocal = toSqliteLocal(
-            new Date(Date.now() + newRentalTime * 60 * 1000)
-          );
+          // 🔥 BE tự tính → dùng UTC
+          const expiresAtUTC = new Date(
+            Date.now() + newRentalTime * 60 * 1000
+          ).toISOString();
 
           db.run(
             `UPDATE rentals SET status='active', rentalTime=?, expiresAt=? WHERE id=?`,
-            [newRentalTime, expiresAtLocal, id],
+            [newRentalTime, expiresAtUTC, id],
             () => {
               res.json({ message: "Đã xác nhận đổi tab", rentalId: id });
             }
@@ -823,13 +824,13 @@ app.patch("/rentals/:id", authMiddleware, (req, res) => {
       newStatus === "active" &&
       action === "cancel_change_tab"
     ) {
-      const expiresAtLocal = toSqliteLocal(
-        new Date(Date.now() + newRentalTime * 60 * 1000)
-      );
+      const expiresAtUTC = new Date(
+        Date.now() + newRentalTime * 60 * 1000
+      ).toISOString();
 
       db.run(
         `UPDATE rentals SET status='active', rentalTime=?, expiresAt=? WHERE id=?`,
-        [newRentalTime, expiresAtLocal, id],
+        [newRentalTime, expiresAtUTC, id],
         () => {
           res.json({ message: "Đã hủy đổi tab", rentalId: id });
         }
@@ -842,16 +843,16 @@ app.patch("/rentals/:id", authMiddleware, (req, res) => {
       db.get(
         `SELECT * FROM rentals WHERE userId=? AND status='active' AND id!=?`,
         [rental.userId, id],
-        (err2, activeRental) => {
+        (err2) => {
           if (err2) return res.status(500).json({ message: "DB error" });
 
-          const expiresAtLocal = toSqliteLocal(
-            new Date(Date.now() + newRentalTime * 60 * 1000)
-          );
+          const expiresAtUTC = new Date(
+            Date.now() + newRentalTime * 60 * 1000
+          ).toISOString();
 
           db.run(
             `UPDATE rentals SET status='active', rentalTime=?, expiresAt=? WHERE id=?`,
-            [newRentalTime, expiresAtLocal, id],
+            [newRentalTime, expiresAtUTC, id],
             () => {
               res.json({ message: "Rental đã active", rentalId: id });
             }
@@ -861,10 +862,9 @@ app.patch("/rentals/:id", authMiddleware, (req, res) => {
       return;
     }
 
-    // ================== CASE 4: ADMIN EDIT (FIX TRIỆT ĐỂ +7H) ==================
+    // ================== CASE 4: ADMIN EDIT (FIX TRIỆT ĐỂ -7H) ==================
     const fields = [];
     const values = [];
-    const isWaiting = ["pending", "retrieved"].includes(rental.status);
 
     if (status !== undefined) {
       fields.push("status=?");
@@ -874,14 +874,6 @@ app.patch("/rentals/:id", authMiddleware, (req, res) => {
     if (rentalTime !== undefined) {
       fields.push("rentalTime=?");
       values.push(rentalTime);
-
-      if (isWaiting) {
-        const resetExpiresAt = toSqliteLocal(
-          new Date(Date.now() + rentalTime * 60 * 1000)
-        );
-        fields.push("expiresAt=?");
-        values.push(resetExpiresAt);
-      }
     }
 
     if (roomCode !== undefined) {
@@ -889,14 +881,11 @@ app.patch("/rentals/:id", authMiddleware, (req, res) => {
       values.push(roomCode);
     }
 
-    // 🔥 FIX CHÍNH Ở ĐÂY
+    // 🔥 FIX QUAN TRỌNG NHẤT
+    // FE đã gửi ISO UTC → lưu NGUYÊN
     if (expiresAt !== undefined) {
-      const parsed = parseLocalDate(expiresAt);
-      if (!parsed) {
-        return res.status(400).json({ message: "expiresAt không hợp lệ" });
-      }
       fields.push("expiresAt=?");
-      values.push(toSqliteLocal(parsed));
+      values.push(expiresAt);
     }
 
     if (!fields.length) {
@@ -1072,27 +1061,57 @@ app.patch("/rentals/:id/confirm-extend", authMiddleware, async (req, res) => {
       return res.status(400).json({ message: "Rental chưa có yêu cầu gia hạn" });
     }
 
-    const now = Date.now();
-    const currentExpires = rental.expiresAt
-      ? new Date(rental.expiresAt).getTime()
-      : 0;
+    // ===== PARSE TIME AN TOÀN SQLITE =====
+    const parseSqliteTime = (str) => {
+      if (!str || typeof str !== "string") return null;
+      const ms = Date.parse(str.replace(" ", "T") + "Z");
+      return isNaN(ms) ? null : ms;
+    };
 
-    const extendMonths = rental.requestedExtendMonths || 1;
-    const extendMinutes = extendMonths * 30 * 24 * 60;
+    const nowMs = Date.now();
+    const expiresMs = parseSqliteTime(rental.expiresAt);
+    const createdMs = parseSqliteTime(rental.createdAt);
 
-    const baseTime = currentExpires > now ? currentExpires : now;
+    // 👉 nếu CHƯA từng gia hạn → dùng expiresAt
+    // 👉 nếu expiresAt null → fallback createdAt
+    // 👉 cuối cùng mới dùng now
+    const baseMs =
+      (expiresMs && expiresMs > nowMs ? expiresMs : expiresMs) ||
+      createdMs ||
+      nowMs;
+
+    // ===== THỜI GIAN GIA HẠN =====
+    const extendMonths = Number(rental.requestedExtendMonths || 1);
+
+    let extendMinutes = 0;
+    let unitCount = 0;
+
+    if (extendMonths >= 1) {
+      // gói tháng
+      extendMinutes = extendMonths * 30 * 24 * 60;
+      unitCount = extendMonths;
+    } else {
+      // gói tuần (0.25 = 1 tuần)
+      const weeks = Math.round(extendMonths / 0.25);
+      extendMinutes = weeks * 7 * 24 * 60;
+      unitCount = weeks;
+    }
+
     const newExpiresAt = new Date(
-      baseTime + extendMinutes * 60000
-    ).toISOString();
+      baseMs + extendMinutes * 60 * 1000
+    )
+      .toISOString()
+      .slice(0, 19)
+      .replace("T", " ");
 
-    // ================== GIÁ ==================
+    // ===== GIÁ =====
     const pricePerTab = rental.pricePerTab || 150000;
     const tabCount = rental.tabs || 1;
 
-    let finalPrice = extendMonths * pricePerTab * tabCount;
+    let finalPrice = unitCount * pricePerTab * tabCount;
     let discountPercent = 0;
 
-    // ================== VOUCHER ==================
+    // ===== VOUCHER =====
     if (rental.extendVoucherCode) {
       const voucher = await dbGet(
         `SELECT * FROM vouchers
@@ -1130,7 +1149,7 @@ app.patch("/rentals/:id/confirm-extend", authMiddleware, async (req, res) => {
       }
     }
 
-    // ================== UPDATE RENTAL ==================
+    // ===== UPDATE RENTAL =====
     await dbRun(
       `UPDATE rentals
        SET status = 'active',
@@ -1141,18 +1160,18 @@ app.patch("/rentals/:id/confirm-extend", authMiddleware, async (req, res) => {
       [newExpiresAt, id]
     );
 
-    // ================== ✅ GHI DOANH THU (GIỐNG API CŨ) ==================
+    // ===== GHI DOANH THU (KHÔNG NOTE) =====
     await dbRun(
       `INSERT INTO revenues (rentalId, amount, type)
        VALUES (?, ?, 'extend')`,
       [id, finalPrice]
     );
 
-    // ================== LOG ==================
+    // ===== LOG =====
     addLog(
       req.user?.id,
       "Xác nhận gia hạn",
-      `Rental #${id} gia hạn ${extendMonths} tháng, doanh thu +${finalPrice}`
+      `Rental #${id} +${finalPrice}`
     );
 
     res.json({
@@ -1163,11 +1182,10 @@ app.patch("/rentals/:id/confirm-extend", authMiddleware, async (req, res) => {
       discountPercent
     });
   } catch (err) {
-    console.error(err);
+    console.error("❌ CONFIRM EXTEND ERROR:", err);
     res.status(500).json({ message: "Lỗi confirm extend" });
   }
 });
-
 
 app.patch("/rentals/:id/reject-extend", authMiddleware, async (req, res) => {
   if (req.user.role !== "admin") {
