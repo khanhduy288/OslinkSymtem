@@ -166,7 +166,22 @@ db.run(`
     UNIQUE(voucher_id, user_id)
   )
 `);
+// ✅ MIGRATE voucher_usages (ADD used_count, last_used_at)
+db.all("PRAGMA table_info(voucher_usages)", (err, columns) => {
+  if (!columns.some(c => c.name === "used_count")) {
+    db.run(
+      "ALTER TABLE voucher_usages ADD COLUMN used_count INTEGER DEFAULT 1",
+      () => console.log("✅ Added used_count to voucher_usages")
+    );
+  }
 
+  if (!columns.some(c => c.name === "last_used_at")) {
+    db.run(
+      "ALTER TABLE voucher_usages ADD COLUMN last_used_at DATETIME",
+      () => console.log("✅ Added last_used_at to voucher_usages")
+    );
+  }
+});
 // ================== RENTAL EXCEPTIONS ==================
 db.run(`
   CREATE TABLE IF NOT EXISTS rental_exceptions (
@@ -405,6 +420,34 @@ function isValidUsername(name) {
 
 app.use("/admin", adminAuth);
 
+app.get("/admin/ctvs", adminAuth , async (req, res) => {
+  const rows = await dbAll(
+    "SELECT id, username, phone, level, createdAt FROM users WHERE level = 2"
+  );
+  res.json(rows);
+});
+
+app.post("/admin/ctvs", adminAuth , async (req, res) => {
+  const { phone } = req.body;
+
+  const user = await dbGet("SELECT * FROM users WHERE phone = ?", [phone]);
+  if (!user) {
+    return res.status(404).json({ message: "Không tìm thấy user" });
+  }
+
+  await dbRun("UPDATE users SET level = 2 WHERE id = ?", [user.id]);
+  res.json({ message: "Đã thêm CTV thành công" });
+});
+
+
+
+app.patch("/admin/ctvs/:id/revoke", adminAuth , async (req, res) => {
+  const { id } = req.params;
+
+  await dbRun("UPDATE users SET level = 1 WHERE id = ?", [id]);
+  res.json({ message: "Đã cắt quyền CTV" });
+});
+
 // ====== API Register ======
 app.post("/register", async (req, res) => {
   try {
@@ -481,7 +524,6 @@ app.get("/admin/users", authMiddleware, (req, res) => {
 
 // ====== API Rentals (unchanged) ======
 
-// ====== API Rentals (FIX UTC - KHÔNG LỆCH GIỜ) ======
 app.post("/rentals", authMiddleware, async (req, res) => {
   try {
     const { username, tabs, months, pricePerTab, voucherCode = null } = req.body;
@@ -497,6 +539,13 @@ app.post("/rentals", authMiddleware, async (req, res) => {
 
     const userId = req.user.id;
 
+    // ================== LẤY USER LEVEL ==================
+    const user = await dbGet(
+      `SELECT level FROM users WHERE id = ?`,
+      [userId]
+    );
+    const userLevel = user?.level || 1;
+
     // ================== XÁC ĐỊNH GÓI ==================
     const isWeekly = months < 1;
 
@@ -505,14 +554,13 @@ app.post("/rentals", authMiddleware, async (req, res) => {
     let voucher = null;
 
     if (isWeekly) {
-      // FE: 0.25 = 1 tuần
-      const weeks = months / 0.25;
+      const weeks = months / 0.25; // FE: 0.25 = 1 tuần
       totalPrice = tabs * weeks * pricePerTab;
     } else {
       totalPrice = tabs * months * pricePerTab;
     }
 
-    // ================== ÁP VOUCHER ==================
+    // ================== ÁP VOUCHER (FIX CORE) ==================
     if (voucherCode) {
       voucher = await dbGet(
         `SELECT * FROM vouchers WHERE code = ? AND is_active = 1`,
@@ -528,35 +576,72 @@ app.post("/rentals", authMiddleware, async (req, res) => {
       if (voucher.max_uses && voucher.used_count >= voucher.max_uses)
         return res.status(400).json({ message: "Voucher đã hết lượt dùng" });
 
-      const used = await dbGet(
-        `SELECT 1 FROM voucher_usages WHERE voucher_id = ? AND user_id = ?`,
+      const usage = await dbGet(
+        `SELECT * FROM voucher_usages
+         WHERE voucher_id = ? AND user_id = ?`,
         [voucher.id, userId]
       );
 
-      if (used)
-        return res.status(400).json({ message: "Voucher đã được sử dụng" });
+      // ❌ user level thấp → chỉ dùng 1 lần
+      if (userLevel < 2 && usage && usage.used_count >= 1) {
+        return res
+          .status(400)
+          .json({ message: "Voucher chỉ được dùng 1 lần" });
+      }
 
+      // ✅ giảm giá (nếu có %)
+      const discountPercent = voucher.discount_percent || 0;
+      if (discountPercent > 0) {
+        totalPrice = Math.round(
+          totalPrice * (100 - discountPercent) / 100
+        );
+      } else {
+        totalPrice = Math.round(totalPrice);
+      }
+
+      // ✅ ghi voucher usage (INSERT / UPDATE)
+      if (!usage) {
+        await dbRun(
+          `INSERT INTO voucher_usages (voucher_id, user_id, used_count, last_used_at)
+           VALUES (?, ?, 1, datetime('now'))`,
+          [voucher.id, userId]
+        );
+      } else {
+        await dbRun(
+          `UPDATE voucher_usages
+           SET used_count = used_count + 1,
+               last_used_at = datetime('now')
+           WHERE id = ?`,
+          [usage.id]
+        );
+      }
+
+      // ✅ tăng tổng lượt voucher
+      await dbRun(
+        `UPDATE vouchers
+         SET used_count = used_count + 1
+         WHERE id = ?`,
+        [voucher.id]
+      );
+    } else {
       totalPrice = Math.round(totalPrice);
     }
 
     // ================== TÍNH THỜI GIAN (PHÚT) ==================
-    let rentalTime; // phút
+    let rentalTime;
 
     if (isWeekly) {
-      // 0.25 tháng = 1 tuần = 7 ngày
-      const days = months * 4 * 7;
+      const days = months * 4 * 7; // 0.25 tháng = 1 tuần
       rentalTime = Math.round(days * 24 * 60);
     } else {
-      // 1 tháng = 30 ngày
       rentalTime = Math.round(months * 30 * 24 * 60);
     }
 
-    // ================== THỜI GIAN UTC (KHÔNG LỆCH) ==================
-    const now = new Date(); // UTC
+    // ================== THỜI GIAN ==================
+    const now = new Date();
     const expiresAt = new Date(
       now.getTime() + rentalTime * 60 * 1000
     ).toISOString();
-
     const createdAt = now.toISOString();
 
     // ================== TẠO RENTAL ==================
@@ -569,26 +654,13 @@ app.post("/rentals", authMiddleware, async (req, res) => {
 
     const rentalId = result.lastID;
 
-    // ================== GHI VOUCHER ==================
-    if (voucher) {
-      await dbRun(
-        `INSERT INTO voucher_usages (voucher_id, user_id) VALUES (?, ?)`,
-        [voucher.id, userId]
-      );
-
-      await dbRun(
-        `UPDATE vouchers SET used_count = used_count + 1 WHERE id = ?`,
-        [voucher.id]
-      );
-    }
-
     // ================== LOG ==================
     addLog(
       userId,
       "Thuê tab",
       `tabs=${tabs}, ${
         isWeekly ? `weeks=${months / 0.25}` : `months=${months}`
-      }, price=${totalPrice}`
+      }, price=${totalPrice}, userLevel=${userLevel}`
     );
 
     res.json({
@@ -596,13 +668,14 @@ app.post("/rentals", authMiddleware, async (req, res) => {
       rentalId,
       totalPrice,
       rentalTime,
-      expiresAt, // UTC
+      expiresAt,
     });
   } catch (err) {
-    console.error(err);
+    console.error("❌ RENTAL ERROR:", err);
     res.status(500).json({ message: "Lỗi thuê tab", error: err.message });
   }
 });
+
 
 // 🟢 API: Lấy username theo userId
 app.get("/admin/getUsernameById/:userId", (req, res) => {
@@ -1045,7 +1118,6 @@ app.post("/rentals/:id/request-extend", authMiddleware, async (req, res) => {
 });
 
 // ================= CONFIRM EXTEND =================
-// ================= CONFIRM EXTEND (FIX FIRST EXTEND BUG) =================
 app.patch("/rentals/:id/confirm-extend", authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
@@ -1063,10 +1135,9 @@ app.patch("/rentals/:id/confirm-extend", authMiddleware, async (req, res) => {
       return res.status(400).json({ message: "Rental chưa có yêu cầu gia hạn" });
     }
 
-    // ===== PARSE SQLITE TIME (LOCAL – KHÔNG ÉP UTC) =====
+    // ===== PARSE SQLITE TIME =====
     const parseSqliteTime = (str) => {
       if (!str) return null;
-      // 🔥 FIX: KHÔNG + "Z"
       const ms = Date.parse(str.replace(" ", "T"));
       return isNaN(ms) ? null : ms;
     };
@@ -1074,17 +1145,12 @@ app.patch("/rentals/:id/confirm-extend", authMiddleware, async (req, res) => {
     const nowMs = Date.now();
     const expiresMs = parseSqliteTime(rental.expiresAt);
 
-    // ===== LOGIC CHUẨN =====
-    // còn hạn → cộng tiếp từ expiresAt
-    // hết hạn → cộng từ now
     const baseMs =
       expiresMs && expiresMs > nowMs
         ? expiresMs
         : nowMs;
 
-    // ===== DỮ LIỆU GIA HẠN (ĐÃ LƯU TỪ FE) =====
     const months = Number(rental.requestedExtendMonths);
-
     if (!months || months <= 0) {
       return res.status(400).json({ message: "requestedExtendMonths invalid" });
     }
@@ -1094,20 +1160,15 @@ app.patch("/rentals/:id/confirm-extend", authMiddleware, async (req, res) => {
     let unitCount = 0;
 
     if (months >= 1) {
-      // gói tháng
       extendMinutes = months * 30 * 24 * 60;
       unitCount = months;
     } else {
-      // gói tuần (0.25 = 1 tuần)
       const weeks = Math.round(months / 0.25);
       extendMinutes = weeks * 7 * 24 * 60;
       unitCount = weeks;
     }
 
-    // ===== TÍNH EXPIRES AT MỚI =====
-    const newExpiresAtMs =
-      baseMs + extendMinutes * 60 * 1000;
-
+    const newExpiresAtMs = baseMs + extendMinutes * 60 * 1000;
     const newExpiresAt = new Date(newExpiresAtMs)
       .toISOString()
       .slice(0, 19)
@@ -1120,7 +1181,14 @@ app.patch("/rentals/:id/confirm-extend", authMiddleware, async (req, res) => {
     let finalPrice = unitCount * pricePerTab * tabCount;
     let discountPercent = 0;
 
-    // ===== VOUCHER =====
+    // ===== LẤY LEVEL USER =====
+    const user = await dbGet(
+      "SELECT level FROM users WHERE id = ?",
+      [rental.userId]
+    );
+    const userLevel = user?.level || 1;
+
+    // ===== VOUCHER (FIX CHUẨN Ở ĐÂY) =====
     if (rental.extendVoucherCode) {
       const voucher = await dbGet(
         `SELECT * FROM vouchers
@@ -1133,28 +1201,47 @@ app.patch("/rentals/:id/confirm-extend", authMiddleware, async (req, res) => {
         new Date(voucher.expires_at) > new Date() &&
         (!voucher.max_uses || voucher.used_count < voucher.max_uses)
       ) {
-        const used = await dbGet(
-          `SELECT 1 FROM voucher_usages
+        const usage = await dbGet(
+          `SELECT * FROM voucher_usages
            WHERE voucher_id = ? AND user_id = ?`,
           [voucher.id, rental.userId]
         );
 
-        if (!used) {
-          discountPercent = voucher.discount_percent || 0;
-          finalPrice = Math.round(
-            finalPrice * (100 - discountPercent) / 100
-          );
+        // ❌ user level thấp → chỉ dùng 1 lần
+        if (userLevel < 2 && usage && usage.used_count >= 1) {
+          throw new Error("Voucher chỉ được dùng 1 lần cho user level thấp");
+        }
 
+        // ✅ áp giảm giá
+        discountPercent = voucher.discount_percent || 0;
+        finalPrice = Math.round(
+          finalPrice * (100 - discountPercent) / 100
+        );
+
+        // ✅ ghi voucher usage (INSERT or UPDATE)
+        if (!usage) {
           await dbRun(
-            "INSERT INTO voucher_usages (voucher_id, user_id) VALUES (?, ?)",
+            `INSERT INTO voucher_usages (voucher_id, user_id, used_count, last_used_at)
+             VALUES (?, ?, 1, datetime('now'))`,
             [voucher.id, rental.userId]
           );
-
+        } else {
           await dbRun(
-            "UPDATE vouchers SET used_count = used_count + 1 WHERE id = ?",
-            [voucher.id]
+            `UPDATE voucher_usages
+             SET used_count = used_count + 1,
+                 last_used_at = datetime('now')
+             WHERE id = ?`,
+            [usage.id]
           );
         }
+
+        // ✅ tăng tổng lượt voucher
+        await dbRun(
+          `UPDATE vouchers
+           SET used_count = used_count + 1
+           WHERE id = ?`,
+          [voucher.id]
+        );
       }
     }
 
@@ -1176,11 +1263,10 @@ app.patch("/rentals/:id/confirm-extend", authMiddleware, async (req, res) => {
       [id, finalPrice]
     );
 
-    // ===== LOG =====
     addLog(
       req.user?.id,
       "Xác nhận gia hạn",
-      `Rental #${id} +${finalPrice}`
+      `Rental #${id}, price=${finalPrice}, level=${userLevel}`
     );
 
     res.json({
@@ -1193,11 +1279,11 @@ app.patch("/rentals/:id/confirm-extend", authMiddleware, async (req, res) => {
     });
   } catch (err) {
     console.error("❌ CONFIRM EXTEND ERROR:", err);
-    res.status(500).json({ message: "Lỗi confirm extend" });
+    res.status(500).json({
+      message: err.message || "Lỗi confirm extend"
+    });
   }
 });
-
-
 
 
 
@@ -1558,6 +1644,7 @@ app.post("/vouchers/validate", authMiddleware, async (req, res) => {
   try {
     const { code } = req.body;
     const userId = req.user.id;
+    const userLevel = req.user.level || 1;
 
     const voucher = await dbGet(
       `SELECT * FROM vouchers
@@ -1574,14 +1661,20 @@ app.post("/vouchers/validate", authMiddleware, async (req, res) => {
     if (voucher.max_uses && voucher.used_count >= voucher.max_uses)
       return res.status(400).json({ message: "Voucher đã hết lượt dùng" });
 
-    const used = await dbGet(
-      `SELECT 1 FROM voucher_usages
-       WHERE voucher_id = ? AND user_id = ?`,
-      [voucher.id, userId]
-    );
+    // 👉 CHỈ CHECK ĐÃ DÙNG KHI LEVEL < 2
+    if (userLevel < 2) {
+      const used = await dbGet(
+        `SELECT 1 FROM voucher_usages
+         WHERE voucher_id = ? AND user_id = ?`,
+        [voucher.id, userId]
+      );
 
-    if (used)
-      return res.status(400).json({ message: "Bạn đã dùng voucher này" });
+      if (used) {
+        return res.status(400).json({
+          message: "Voucher chỉ dùng 1 lần với tài khoản level thấp"
+        });
+      }
+    }
 
     res.json({
       discountPercent: voucher.discount_percent
@@ -1591,7 +1684,6 @@ app.post("/vouchers/validate", authMiddleware, async (req, res) => {
     res.status(500).json({ message: "Lỗi kiểm tra voucher" });
   }
 });
-
 // ================== CREATE RENTAL EXCEPTION ==================
 app.post("/admin/rental-exceptions", adminAuth, async (req, res) => {
   try {
