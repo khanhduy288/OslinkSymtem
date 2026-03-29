@@ -6,9 +6,10 @@ const path = require("path");
 const axios = require('axios');
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-require('dotenv').config();
+
 const app = express();
 const PORT = 5000;
+require('dotenv').config();
 const SECRET_KEY = process.env.SECRET_KEY;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
 
@@ -32,7 +33,35 @@ const db = new sqlite3.Database(dbPath, (err) => {
   else console.log("✅ SQLite connected:", dbPath);
 });
 
-// ====== Create / migrate users table if not exists ======
+// ====== SQLite Promise Helpers ======
+const dbRun = (sql, params = []) =>
+  new Promise((resolve, reject) => {
+    db.run(sql, params, function (err) {
+      if (err) reject(err);
+      else resolve(this); // this.lastID, this.changes
+    });
+  });
+
+const dbGet = (sql, params = []) =>
+  new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+
+const dbAll = (sql, params = []) =>
+  new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows);
+    });
+  });
+
+
+
+// ====== 
+// Create / migrate users table if not exists ======
 // ====== Create / migrate users & rentals table if not exists ======
 db.serialize(() => {
   // Users table
@@ -94,6 +123,16 @@ db.serialize(() => {
       );
     }
   });
+// ✅ Add new column extendVoucherCode (nếu chưa tồn tại)
+db.all("PRAGMA table_info(rentals)", (err, columns) => {
+  if (!columns.some(c => c.name === "extendVoucherCode")) {
+    db.run(
+      "ALTER TABLE rentals ADD COLUMN extendVoucherCode TEXT",
+      () => console.log("✅ Added column extendVoucherCode to rentals ✅")
+    );
+  }
+});
+
 
     // Settings table
   db.run(`
@@ -102,6 +141,66 @@ db.serialize(() => {
       value TEXT
     )
   `);
+
+  // ================== VOUCHERS ==================
+  db.run(`
+    CREATE TABLE IF NOT EXISTS vouchers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      code TEXT NOT NULL UNIQUE,
+      discount_percent INTEGER NOT NULL CHECK(discount_percent > 0 AND discount_percent <= 100),
+      expires_at DATETIME NOT NULL,
+      max_uses INTEGER,              -- NULL = không giới hạn
+      used_count INTEGER DEFAULT 0,
+      is_active INTEGER DEFAULT 1,   -- 1 = active, 0 = disabled
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  
+  // ================== VOUCHER USAGES ==================
+db.run(`
+  CREATE TABLE IF NOT EXISTS voucher_usages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    voucher_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    used_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(voucher_id, user_id)
+  )
+`);
+// ✅ MIGRATE voucher_usages (ADD used_count, last_used_at)
+db.all("PRAGMA table_info(voucher_usages)", (err, columns) => {
+  if (!columns.some(c => c.name === "used_count")) {
+    db.run(
+      "ALTER TABLE voucher_usages ADD COLUMN used_count INTEGER DEFAULT 1",
+      () => console.log("✅ Added used_count to voucher_usages")
+    );
+  }
+
+  if (!columns.some(c => c.name === "last_used_at")) {
+    db.run(
+      "ALTER TABLE voucher_usages ADD COLUMN last_used_at DATETIME",
+      () => console.log("✅ Added last_used_at to voucher_usages")
+    );
+  }
+});
+// ================== RENTAL EXCEPTIONS ==================
+db.run(`
+  CREATE TABLE IF NOT EXISTS rental_exceptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    time DATETIME DEFAULT (datetime('now','localtime')),
+    customerName TEXT NOT NULL,
+    machineCount INTEGER NOT NULL,
+    price REAL NOT NULL,
+    totalAmount REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'rent', -- rent | stop
+    createdAt DATETIME DEFAULT (datetime('now','localtime'))
+  )
+`);
+
+
+db.run(`
+  CREATE INDEX IF NOT EXISTS idx_voucher_code
+  ON vouchers(code)
+`);
 
   // Set default WORKER_API nếu chưa có
   db.get("SELECT value FROM settings WHERE key = 'WORKER_API'", (err, row) => {
@@ -130,13 +229,80 @@ function addMinutes(date, minutes) {
   return new Date(date.getTime() + minutes * 60000);
 }
 
-function addLog(userId, action, details = "") {
+function calcRevenue({ rental, rentalTime }) {
+  const price = rental.pricePerTab || 150000;
+  const tabs = rental.tabs || 1;
+
+  // Gói tuần: FE fix cứng 50k
+  const isWeekly = price === 50000;
+
+  if (isWeekly) {
+    const weeks = rentalTime / (7 * 24 * 60); // 10080
+    return price * tabs * weeks;
+  } else {
+    const months = rentalTime / (30 * 24 * 60); // 43200
+    return price * tabs * months;
+  }
+}
+
+function toSqliteLocal(date) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+  );
+}
+
+// parse ISO nhưng COI LÀ LOCAL (không UTC)
+function parseLocalDate(input) {
+  if (typeof input !== "string") return null;
+
+  // bỏ Z nếu có
+  const clean = input.replace("Z", "");
+
+  // YYYY-MM-DDTHH:mm:ss
+  const m = clean.match(
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/
+  );
+  if (!m) return null;
+
+  const [, y, mo, d, h, mi, s = "0"] = m;
+  return new Date(
+    Number(y),
+    Number(mo) - 1,
+    Number(d),
+    Number(h),
+    Number(mi),
+    Number(s)
+  );
+}
+// 🔑 convert mọi Date (kể cả ISO có Z) về LOCAL TIME
+function ensureLocalDate(input) {
+  const d = new Date(input);
+  if (isNaN(d.getTime())) return null;
+
+  // nếu FE gửi UTC (ISO có Z) → đưa về local
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000);
+}
+
+function nowUTC() {
+  return new Date();
+}
+
+function addMinutesUTC(date, minutes) {
+  return new Date(date.getTime() + minutes * 60 * 1000);
+}
+
+function addLog(userId, action, details = "", extra = {}) {
+  const extraStr = Object.keys(extra).length
+    ? " | " + JSON.stringify(extra)
+    : "";
+
   if (!userId) {
-    // nếu không có userId (ví dụ admin), ghi lại "admin"
     db.run(
       `INSERT INTO logs (userId, username, action, details, createdAt)
        VALUES (NULL, 'admin', ?, ?, datetime('now', 'localtime'))`,
-      [action, details],
+      [action, details + extraStr],
       (err) => {
         if (err) console.error("[LOG ERROR]", err.message);
       }
@@ -144,19 +310,19 @@ function addLog(userId, action, details = "") {
     return;
   }
 
-  // nếu có userId → tự lấy username từ bảng users
   db.get(`SELECT username FROM users WHERE id = ?`, [userId], (err, row) => {
     const username = row?.username || "unknown";
     db.run(
       `INSERT INTO logs (userId, username, action, details, createdAt)
        VALUES (?, ?, ?, ?, datetime('now', 'localtime'))`,
-      [userId, username, action, details],
+      [userId, username, action, details + extraStr],
       (err2) => {
         if (err2) console.error("[LOG ERROR]", err2.message);
       }
     );
   });
 }
+
 
 async function addRevenue(rentalId, amount, type = "new_rental") {
   return new Promise((resolve, reject) => {
@@ -254,6 +420,34 @@ function isValidUsername(name) {
 
 app.use("/admin", adminAuth);
 
+app.get("/admin/ctvs", adminAuth , async (req, res) => {
+  const rows = await dbAll(
+    "SELECT id, username, phone, level, createdAt FROM users WHERE level = 2"
+  );
+  res.json(rows);
+});
+
+app.post("/admin/ctvs", adminAuth , async (req, res) => {
+  const { phone } = req.body;
+
+  const user = await dbGet("SELECT * FROM users WHERE phone = ?", [phone]);
+  if (!user) {
+    return res.status(404).json({ message: "Không tìm thấy user" });
+  }
+
+  await dbRun("UPDATE users SET level = 2 WHERE id = ?", [user.id]);
+  res.json({ message: "Đã thêm CTV thành công" });
+});
+
+
+
+app.patch("/admin/ctvs/:id/revoke", adminAuth , async (req, res) => {
+  const { id } = req.params;
+
+  await dbRun("UPDATE users SET level = 1 WHERE id = ?", [id]);
+  res.json({ message: "Đã cắt quyền CTV" });
+});
+
 // ====== API Register ======
 app.post("/register", async (req, res) => {
   try {
@@ -331,48 +525,154 @@ app.get("/admin/users", authMiddleware, (req, res) => {
 // ====== API Rentals (unchanged) ======
 
 app.post("/rentals", authMiddleware, async (req, res) => {
-  const { username, tabs, months, pricePerTab } = req.body; // chỉ nhận thêm pricePerTab
-  if (!username || !tabs || !months || !pricePerTab)
-    return res.status(400).json({ message: "Missing params" });
-
   try {
-    const rentalTimeInMinutes = months * 30 * 24 * 60; // 1 tháng = 30 ngày
-    const now = new Date();
+    const { username, tabs, months, pricePerTab, voucherCode = null } = req.body;
 
-    const rentalsToInsert = [];
-    for (let i = 0; i < tabs; i++) {
-      const expiresAt = toSqlDateTime(addMinutes(now, rentalTimeInMinutes));
-      rentalsToInsert.push({
-        username,
-        rentalTime: rentalTimeInMinutes,
-        expiresAt,
-        pricePerTab,
-      });
+    if (!username || !tabs || !months || !pricePerTab) {
+      return res.status(400).json({ message: "Thiếu dữ liệu" });
     }
 
-    db.serialize(() => {
-      const stmt = db.prepare(
-        `INSERT INTO rentals (userId, rentalTime, status, createdAt, expiresAt, tabs, pricePerTab) VALUES (?, ?, 'pending', ?, ?, ?, ?)`
+    // Chặn months quá nhỏ
+    if (months > 0 && months < 0.25) {
+      return res.status(400).json({ message: "Thời gian thuê không hợp lệ" });
+    }
+
+    const userId = req.user.id;
+
+    // ================== LẤY USER LEVEL ==================
+    const user = await dbGet(
+      `SELECT level FROM users WHERE id = ?`,
+      [userId]
+    );
+    const userLevel = user?.level || 1;
+
+    // ================== XÁC ĐỊNH GÓI ==================
+    const isWeekly = months < 1;
+
+    // ================== TÍNH GIÁ ==================
+    let totalPrice;
+    let voucher = null;
+
+    if (isWeekly) {
+      const weeks = months / 0.25; // FE: 0.25 = 1 tuần
+      totalPrice = tabs * weeks * pricePerTab;
+    } else {
+      totalPrice = tabs * months * pricePerTab;
+    }
+
+    // ================== ÁP VOUCHER (FIX CORE) ==================
+    if (voucherCode) {
+      voucher = await dbGet(
+        `SELECT * FROM vouchers WHERE code = ? AND is_active = 1`,
+        [voucherCode.toUpperCase()]
       );
 
-      rentalsToInsert.forEach(r => {
-        stmt.run([req.user.id, r.rentalTime, toSqlDateTime(now), r.expiresAt, 1, r.pricePerTab]);
-      });
+      if (!voucher)
+        return res.status(400).json({ message: "Voucher không hợp lệ" });
 
-      stmt.finalize((err) => {
-        if (err) return res.status(500).json({ message: "DB insert error", error: err.message });
-        addLog(
-          req.user?.id,              // userId, nếu admin có thể là null
-          "Thuê tab",                // action
-          `${tabs} tab(s) × ${pricePerTab.toLocaleString()}đ/tháng × ${months} tháng` // details
+      if (new Date(voucher.expires_at) < new Date())
+        return res.status(400).json({ message: "Voucher đã hết hạn" });
+
+      if (voucher.max_uses && voucher.used_count >= voucher.max_uses)
+        return res.status(400).json({ message: "Voucher đã hết lượt dùng" });
+
+      const usage = await dbGet(
+        `SELECT * FROM voucher_usages
+         WHERE voucher_id = ? AND user_id = ?`,
+        [voucher.id, userId]
+      );
+
+      // ❌ user level thấp → chỉ dùng 1 lần
+      if (userLevel < 2 && usage && usage.used_count >= 1) {
+        return res
+          .status(400)
+          .json({ message: "Voucher chỉ được dùng 1 lần" });
+      }
+
+      // ✅ giảm giá (nếu có %)
+      const discountPercent = voucher.discount_percent || 0;
+      if (discountPercent > 0) {
+        totalPrice = Math.round(
+          totalPrice * (100 - discountPercent) / 100
         );
-        res.json({ message: `Tạo ${tabs} bản ghi thành công với giá ${pricePerTab.toLocaleString()} VND mỗi tab!` });
-      });
-    });
+      } else {
+        totalPrice = Math.round(totalPrice);
+      }
 
+      // ✅ ghi voucher usage (INSERT / UPDATE)
+      if (!usage) {
+        await dbRun(
+          `INSERT INTO voucher_usages (voucher_id, user_id, used_count, last_used_at)
+           VALUES (?, ?, 1, datetime('now'))`,
+          [voucher.id, userId]
+        );
+      } else {
+        await dbRun(
+          `UPDATE voucher_usages
+           SET used_count = used_count + 1,
+               last_used_at = datetime('now')
+           WHERE id = ?`,
+          [usage.id]
+        );
+      }
+
+      // ✅ tăng tổng lượt voucher
+      await dbRun(
+        `UPDATE vouchers
+         SET used_count = used_count + 1
+         WHERE id = ?`,
+        [voucher.id]
+      );
+    } else {
+      totalPrice = Math.round(totalPrice);
+    }
+
+    // ================== TÍNH THỜI GIAN (PHÚT) ==================
+    let rentalTime;
+
+    if (isWeekly) {
+      const days = months * 4 * 7; // 0.25 tháng = 1 tuần
+      rentalTime = Math.round(days * 24 * 60);
+    } else {
+      rentalTime = Math.round(months * 30 * 24 * 60);
+    }
+
+    // ================== THỜI GIAN ==================
+    const now = new Date();
+    const expiresAt = new Date(
+      now.getTime() + rentalTime * 60 * 1000
+    ).toISOString();
+    const createdAt = now.toISOString();
+
+    // ================== TẠO RENTAL ==================
+    const result = await dbRun(
+      `INSERT INTO rentals
+       (userId, rentalTime, createdAt, expiresAt, tabs, pricePerTab, status)
+       VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
+      [userId, rentalTime, createdAt, expiresAt, tabs, pricePerTab]
+    );
+
+    const rentalId = result.lastID;
+
+    // ================== LOG ==================
+    addLog(
+      userId,
+      "Thuê tab",
+      `tabs=${tabs}, ${
+        isWeekly ? `weeks=${months / 0.25}` : `months=${months}`
+      }, price=${totalPrice}, userLevel=${userLevel}`
+    );
+
+    res.json({
+      message: "Thuê tab thành công",
+      rentalId,
+      totalPrice,
+      rentalTime,
+      expiresAt,
+    });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Server error" });
+    console.error("❌ RENTAL ERROR:", err);
+    res.status(500).json({ message: "Lỗi thuê tab", error: err.message });
   }
 });
 
@@ -418,22 +718,26 @@ app.get("/rentals", authMiddleware, (req, res) => {
   );
 });
 
-// API cho admin
 app.get("/admin/rentals", adminAuth, (req, res) => {
   const { userId, _sort, _order, _limit } = req.query;
 
-  let sql = `SELECT rentals.*, users.username
-             FROM rentals
-             JOIN users ON rentals.userId = users.id`;
+  let sql = `
+    SELECT rentals.*,
+           users.username
+    FROM rentals
+    LEFT JOIN users ON rentals.userId = users.id
+  `;
   const params = [];
 
   if (userId) {
-    sql += " WHERE rentals.userId=?";
+    sql += " WHERE rentals.userId = ?";
     params.push(userId);
   }
 
   if (_sort) {
-    sql += ` ORDER BY ${_sort} ${_order && _order.toUpperCase() === "DESC" ? "DESC" : "ASC"}`;
+    sql += ` ORDER BY ${_sort} ${
+      _order && _order.toUpperCase() === "DESC" ? "DESC" : "ASC"
+    }`;
   }
 
   if (_limit) {
@@ -560,7 +864,6 @@ app.patch("/rentals/:id", authMiddleware, (req, res) => {
       newStatus === "active" &&
       action === "confirm_change_tab"
     ) {
-      console.log(`[INFO] Xác nhận đổi tab cho rentalId=${id}, roomCode=${rental.roomCode}`);
       axios
         .post(`${WORKER_API}/command`, {
           action: "change_devide",
@@ -569,44 +872,16 @@ app.patch("/rentals/:id", authMiddleware, (req, res) => {
           roomCode: rental.roomCode,
         })
         .then(() => {
+          // 🔥 BE tự tính → dùng UTC
+          const expiresAtUTC = new Date(
+            Date.now() + newRentalTime * 60 * 1000
+          ).toISOString();
+
           db.run(
-            `UPDATE rentals SET status='active', rentalTime=? WHERE id=?`,
-            [newRentalTime, id],
+            `UPDATE rentals SET status='active', rentalTime=?, expiresAt=? WHERE id=?`,
+            [newRentalTime, expiresAtUTC, id],
             () => {
-              addLog(
-                req.user?.id,
-                "Xác nhận đổi tab",
-                `Rental #${id} (${rental.roomCode}) đã được xác nhận đổi tab`
-              );
-
-              // 🟢 Ghi doanh thu nếu chuyển từ pending/retrieved sang active
-              if (
-                (rental.status === "pending" || rental.status === "retrieved") &&
-                newStatus === "active"
-              ) {
-                const months = rental.rentalTime / 43200;
-                const amount =
-                  (rental.pricePerTab || 150000) * (rental.tabs || 1) * months;
-
-                db.run(
-                  `INSERT INTO revenues (rentalId, amount, type, createdAt)
-                   VALUES (?, ?, 'new_rental', datetime('now','localtime'))`,
-                  [id, amount],
-                  (errRev) => {
-                    if (errRev)
-                      console.error("❌ Lỗi ghi doanh thu:", errRev.message);
-                    else
-                      console.log(
-                        `✅ Ghi doanh thu rental #${id} (${rental.roomCode}): ${amount}`
-                      );
-                  }
-                );
-              }
-
-              res.json({
-                message: "Đã gửi change_devide cho worker",
-                rentalId: id,
-              });
+              res.json({ message: "Đã xác nhận đổi tab", rentalId: id });
             }
           );
         })
@@ -616,463 +891,51 @@ app.patch("/rentals/:id", authMiddleware, (req, res) => {
       return;
     }
 
-    // ================== CASE 2: HỦY YÊU CẦU ĐỔI TAB ==================
+    // ================== CASE 2: HỦY ĐỔI TAB ==================
     if (
       rental.status === "pending_change_tab" &&
       newStatus === "active" &&
       action === "cancel_change_tab"
     ) {
-      console.log(`[INFO] Hủy yêu cầu đổi tab rentalId=${id}`);
+      const expiresAtUTC = new Date(
+        Date.now() + newRentalTime * 60 * 1000
+      ).toISOString();
+
       db.run(
-        `UPDATE rentals SET status='active', rentalTime=? WHERE id=?`,
-        [newRentalTime, id],
+        `UPDATE rentals SET status='active', rentalTime=?, expiresAt=? WHERE id=?`,
+        [newRentalTime, expiresAtUTC, id],
         () => {
-          addLog(
-            req.user?.id,
-            "Hủy yêu cầu đổi tab",
-            `Rental #${id} (${rental.roomCode}) quay lại trạng thái active`
-          );
-
-          if (
-            (rental.status === "pending" || rental.status === "retrieved") &&
-            newStatus === "active"
-          ) {
-            const months = rental.rentalTime / 43200;
-            const amount =
-              (rental.pricePerTab || 150000) * (rental.tabs || 1) * months;
-
-            db.run(
-              `INSERT INTO revenues (rentalId, amount, type, createdAt)
-               VALUES (?, ?, 'new_rental', datetime('now','localtime'))`,
-              [id, amount],
-              (errRev) => {
-                if (errRev)
-                  console.error("❌ Lỗi ghi doanh thu:", errRev.message);
-                else
-                  console.log(
-                    `✅ Ghi doanh thu rental #${id} (${rental.roomCode}): ${amount}`
-                  );
-              }
-            );
-          }
-
-          res.json({
-            message: "Đã hủy yêu cầu đổi tab, quay lại active",
-            rentalId: id,
-          });
+          res.json({ message: "Đã hủy đổi tab", rentalId: id });
         }
       );
       return;
     }
 
-    // ================== CASE 3: KÍCH HOẠT RENTAL MỚI ==================
+    // ================== CASE 3: KÍCH HOẠT / GIA HẠN ==================
     if (newStatus === "active" && !newRoomCode) {
       db.get(
         `SELECT * FROM rentals WHERE userId=? AND status='active' AND id!=?`,
         [rental.userId, id],
-        (err2, activeRental) => {
+        (err2) => {
           if (err2) return res.status(500).json({ message: "DB error" });
 
-          if (activeRental) {
-            // extend_room
-            console.log(`[INFO] User ${rental.userId} đã có rental active, gửi extend_room`);
-            axios
-              .post(`${WORKER_API}/command`, {
-                action: "extend_room",
-                userId: rental.userId,
-                rentalId: id,
-                rentalTime: newRentalTime,
-                roomCode: activeRental.roomCode,
-              })
-              .then(() => {
-                db.run(
-                  `UPDATE rentals SET status='active', rentalTime=? WHERE id=?`,
-                  [newRentalTime, id],
-                  () => {
-                    addLog(
-                      req.user?.id,
-                      "Gia hạn rental",
-                      `Rental #${id} của userId=${rental.userId} được extend thêm ${newRentalTime} phút`
-                    );
+          const expiresAtUTC = new Date(
+            Date.now() + newRentalTime * 60 * 1000
+          ).toISOString();
 
-                    const months = newRentalTime / 43200;
-                    const amount =
-                      (rental.pricePerTab || 150000) * (rental.tabs || 1) * months;
-
-                    db.run(
-                      `INSERT INTO revenues (rentalId, amount, type, createdAt)
-                       VALUES (?, ?, 'extend', datetime('now','localtime'))`,
-                      [id, amount],
-                      (errRev) => {
-                        if (errRev)
-                          console.error("❌ Lỗi ghi doanh thu (extend):", errRev.message);
-                        else
-                          console.log(
-                            `✅ Ghi doanh thu gia hạn rental #${id}: ${amount}`
-                          );
-                      }
-                    );
-
-                    res.json({
-                      message: "Đã gửi extend_room cho worker",
-                      rentalId: id,
-                    });
-                  }
-                );
-              })
-              .catch((e) =>
-                res.status(500).json({ message: "Worker API error", error: e.message })
-              );
-          } else {
-            // create_room
-            axios
-              .post(`${WORKER_API}/command`, {
-                action: "create_room",
-                userId: rental.userId,
-                rentalId: id,
-                rentalTime: newRentalTime,
-              })
-              .then(() => {
-                db.run(
-                  `UPDATE rentals SET status='active', rentalTime=? WHERE id=?`,
-                  [newRentalTime, id],
-                  () => {
-                    addLog(
-                      req.user?.id,
-                      "Kích hoạt rental",
-                      `Rental #${id} được chuyển sang trạng thái active`
-                    );
-
-                    const months = newRentalTime / 43200;
-                    const amount =
-                      (rental.pricePerTab || 150000) * (rental.tabs || 1) * months;
-
-                    db.run(
-                      `INSERT INTO revenues (rentalId, amount, type, createdAt)
-                       VALUES (?, ?, 'new_rental', datetime('now','localtime'))`,
-                      [id, amount],
-                      (errRev) => {
-                        if (errRev)
-                          console.error("❌ Lỗi ghi doanh thu:", errRev.message);
-                        else
-                          console.log(
-                            `✅ Ghi doanh thu rental #${id} (${rental.roomCode}): ${amount}`
-                          );
-                      }
-                    );
-
-                    res.json({
-                      message: "Đã gửi create_room cho worker",
-                      rentalId: id,
-                    });
-                  }
-                );
-              })
-              .catch((e) =>
-                res.status(500).json({ message: "Worker API error", error: e.message })
-              );
-          }
-        }
-      );
-      return;
-    }
-
-    // ================== CASE 4: ADMIN CHỈNH HẠN / TRỰC TIẾP ==================
-    const fields = [];
-    const values = [];
-
-    if (status !== undefined) {
-      fields.push("status=?");
-      values.push(status);
-    }
-    if (rentalTime !== undefined) {
-      fields.push("rentalTime=?");
-      values.push(rentalTime);
-    }
-    if (roomCode !== undefined) {
-      fields.push("roomCode=?");
-      values.push(roomCode);
-    }
-    if (expiresAt !== undefined) {
-      const parsed = new Date(expiresAt);
-      if (isNaN(parsed.getTime()))
-        return res.status(400).json({ message: "expiresAt không hợp lệ" });
-      fields.push("expiresAt=?");
-      values.push(parsed.toISOString());
-    }
-
-    if (fields.length === 0)
-      return res.json({ message: "Không có gì để cập nhật" });
-
-    db.run(`UPDATE rentals SET ${fields.join(", ")} WHERE id=?`, [...values, id], function (err3) {
-      if (err3) return res.status(500).json({ message: err3.message });
-
-      const changes = fields.map((f, idx) => `${f.split("=")[0]}=${values[idx]}`);
-      addLog(
-        req.user?.id,
-        "Chỉnh sửa rental",
-        `Rental #${id} chỉnh sửa các trường: ${changes.join(", ")}`
-      );
-
-      if ((rental.status === "pending" || rental.status === "retrieved") && status === "active") {
-        const months = rental.rentalTime / 43200;
-        const amount =
-          (rental.pricePerTab || 150000) * (rental.tabs || 1) * months;
-
-        db.run(
-          `INSERT INTO revenues (rentalId, amount, type, createdAt)
-           VALUES (?, ?, 'new_rental', datetime('now','localtime'))`,
-          [id, amount],
-          (errRev) => {
-            if (errRev) console.error("❌ Lỗi ghi doanh thu:", errRev.message);
-            else
-              console.log(
-                `✅ Ghi doanh thu rental #${id} (${rental.roomCode}): ${amount}`
-              );
-          }
-        );
-      }
-
-      db.get(`SELECT * FROM rentals WHERE id=?`, [id], (err4, updated) => {
-        if (err4) return res.status(500).json({ message: "DB error" });
-        res.json({ message: "Cập nhật thành công", rental: updated });
-      });
-    });
-  });
-});
-app.patch("/rentals/:id", authMiddleware, (req, res) => {
-  const { id } = req.params;
-  const { status, roomCode, rentalTime, action, expiresAt } = req.body;
-
-  db.get(`SELECT * FROM rentals WHERE id=?`, [id], (err, rental) => {
-    if (err) return res.status(500).json({ message: "DB error" });
-    if (!rental) return res.status(404).json({ message: "Rental not found" });
-
-    const newStatus = status ?? rental.status;
-    const newRentalTime = rentalTime ?? rental.rentalTime;
-    const newRoomCode = roomCode ?? rental.roomCode;
-
-    // ================== CASE 1: XÁC NHẬN ĐỔI TAB ==================
-    if (
-      rental.status === "pending_change_tab" &&
-      newStatus === "active" &&
-      action === "confirm_change_tab"
-    ) {
-      console.log(`[INFO] Xác nhận đổi tab cho rentalId=${id}, roomCode=${rental.roomCode}`);
-      axios
-        .post(`${WORKER_API}/command`, {
-          action: "change_devide",
-          userId: rental.userId,
-          rentalId: id,
-          roomCode: rental.roomCode,
-        })
-        .then(() => {
           db.run(
-            `UPDATE rentals SET status='active', rentalTime=? WHERE id=?`,
-            [newRentalTime, id],
+            `UPDATE rentals SET status='active', rentalTime=?, expiresAt=? WHERE id=?`,
+            [newRentalTime, expiresAtUTC, id],
             () => {
-              addLog(
-                req.user?.id,
-                "Xác nhận đổi tab",
-                `Rental #${id} (${rental.roomCode}) đã được xác nhận đổi tab`
-              );
-
-              // 🟢 Ghi doanh thu nếu chuyển từ pending/retrieved sang active
-              if (
-                (rental.status === "pending" || rental.status === "retrieved") &&
-                newStatus === "active"
-              ) {
-                const months = rental.rentalTime / 43200;
-                const amount =
-                  (rental.pricePerTab || 150000) * (rental.tabs || 1) * months;
-
-                db.run(
-                  `INSERT INTO revenues (rentalId, amount, type, createdAt)
-                   VALUES (?, ?, 'new_rental', datetime('now','localtime'))`,
-                  [id, amount],
-                  (errRev) => {
-                    if (errRev)
-                      console.error("❌ Lỗi ghi doanh thu:", errRev.message);
-                    else
-                      console.log(
-                        `✅ Ghi doanh thu rental #${id} (${rental.roomCode}): ${amount}`
-                      );
-                  }
-                );
-              }
-
-              res.json({
-                message: "Đã gửi change_devide cho worker",
-                rentalId: id,
-              });
+              res.json({ message: "Rental đã active", rentalId: id });
             }
           );
-        })
-        .catch((e) =>
-          res.status(500).json({ message: "Worker API error", error: e.message })
-        );
-      return;
-    }
-    // ================== CASE 2: HỦY YÊU CẦU ĐỔI TAB ==================
-    if (
-      rental.status === "pending_change_tab" &&
-      newStatus === "active" &&
-      action === "cancel_change_tab"
-    ) {
-      console.log(`[INFO] Hủy yêu cầu đổi tab rentalId=${id}`);
-      db.run(
-        `UPDATE rentals SET status='active', rentalTime=? WHERE id=?`,
-        [newRentalTime, id],
-        () => {
-          addLog(
-            req.user?.id,
-            "Hủy yêu cầu đổi tab",
-            `Rental #${id} (${rental.roomCode}) quay lại trạng thái active`
-          );
-
-          if (
-            (rental.status === "pending" || rental.status === "retrieved") &&
-            newStatus === "active"
-          ) {
-            const months = rental.rentalTime / 43200;
-            const amount =
-              (rental.pricePerTab || 150000) * (rental.tabs || 1) * months;
-
-            db.run(
-              `INSERT INTO revenues (rentalId, amount, type, createdAt)
-               VALUES (?, ?, 'new_rental', datetime('now','localtime'))`,
-              [id, amount],
-              (errRev) => {
-                if (errRev)
-                  console.error("❌ Lỗi ghi doanh thu:", errRev.message);
-                else
-                  console.log(
-                    `✅ Ghi doanh thu rental #${id} (${rental.roomCode}): ${amount}`
-                  );
-              }
-            );
-          }
-
-          res.json({
-            message: "Đã hủy yêu cầu đổi tab, quay lại active",
-            rentalId: id,
-          });
         }
       );
       return;
     }
-    // ================== CASE 3: KÍCH HOẠT RENTAL MỚI ==================
-    if (newStatus === "active" && !newRoomCode) {
-      db.get(
-        `SELECT * FROM rentals WHERE userId=? AND status='active' AND id!=?`,
-        [rental.userId, id],
-        (err2, activeRental) => {
-          if (err2) return res.status(500).json({ message: "DB error" });
 
-          if (activeRental) {
-            // extend_room
-            console.log(`[INFO] User ${rental.userId} đã có rental active, gửi extend_room`);
-            axios
-              .post(`${WORKER_API}/command`, {
-                action: "extend_room",
-                userId: rental.userId,
-                rentalId: id,
-                rentalTime: newRentalTime,
-                roomCode: activeRental.roomCode,
-              })
-              .then(() => {
-                db.run(
-                  `UPDATE rentals SET status='active', rentalTime=? WHERE id=?`,
-                  [newRentalTime, id],
-                  () => {
-                    addLog(
-                      req.user?.id,
-                      "Gia hạn rental",
-                      `Rental #${id} của userId=${rental.userId} được extend thêm ${newRentalTime} phút`
-                    );
-
-                    const months = newRentalTime / 43200;
-                    const amount =
-                      (rental.pricePerTab || 150000) * (rental.tabs || 1) * months;
-
-                    db.run(
-                      `INSERT INTO revenues (rentalId, amount, type, createdAt)
-                       VALUES (?, ?, 'extend', datetime('now','localtime'))`,
-                      [id, amount],
-                      (errRev) => {
-                        if (errRev)
-                          console.error("❌ Lỗi ghi doanh thu (extend):", errRev.message);
-                        else
-                          console.log(
-                            `✅ Ghi doanh thu gia hạn rental #${id}: ${amount}`
-                          );
-                      }
-                    );
-
-                    res.json({
-                      message: "Đã gửi extend_room cho worker",
-                      rentalId: id,
-                    });
-                  }
-                );
-              })
-              .catch((e) =>
-                res.status(500).json({ message: "Worker API error", error: e.message })
-              );
-          } else {
-            // create_room
-            axios
-              .post(`${WORKER_API}/command`, {
-                action: "create_room",
-                userId: rental.userId,
-                rentalId: id,
-                rentalTime: newRentalTime,
-              })
-              .then(() => {
-                db.run(
-                  `UPDATE rentals SET status='active', rentalTime=? WHERE id=?`,
-                  [newRentalTime, id],
-                  () => {
-                    addLog(
-                      req.user?.id,
-                      "Kích hoạt rental",
-                      `Rental #${id} được chuyển sang trạng thái active`
-                    );
-
-                    const months = newRentalTime / 43200;
-                    const amount =
-                      (rental.pricePerTab || 150000) * (rental.tabs || 1) * months;
-
-                    db.run(
-                      `INSERT INTO revenues (rentalId, amount, type, createdAt)
-                       VALUES (?, ?, 'new_rental', datetime('now','localtime'))`,
-                      [id, amount],
-                      (errRev) => {
-                        if (errRev)
-                          console.error("❌ Lỗi ghi doanh thu:", errRev.message);
-                        else
-                          console.log(
-                            `✅ Ghi doanh thu rental #${id} (${rental.roomCode}): ${amount}`
-                          );
-                      }
-                    );
-
-                    res.json({
-                      message: "Đã gửi create_room cho worker",
-                      rentalId: id,
-                    });
-                  }
-                );
-              })
-              .catch((e) =>
-                res.status(500).json({ message: "Worker API error", error: e.message })
-              );
-          }
-        }
-      );
-      return;
-    }
-    // ================== CASE 4: ADMIN CHỈNH HẠN / TRỰC TIẾP ==================
+    // ================== CASE 4: ADMIN EDIT (FIX TRIỆT ĐỂ -7H) ==================
     const fields = [];
     const values = [];
 
@@ -1080,77 +943,65 @@ app.patch("/rentals/:id", authMiddleware, (req, res) => {
       fields.push("status=?");
       values.push(status);
     }
+
     if (rentalTime !== undefined) {
       fields.push("rentalTime=?");
       values.push(rentalTime);
     }
+
     if (roomCode !== undefined) {
       fields.push("roomCode=?");
       values.push(roomCode);
     }
+
+    // 🔥 FIX QUAN TRỌNG NHẤT
+    // FE đã gửi ISO UTC → lưu NGUYÊN
     if (expiresAt !== undefined) {
-      const parsed = new Date(expiresAt);
-      if (isNaN(parsed.getTime()))
-        return res.status(400).json({ message: "expiresAt không hợp lệ" });
       fields.push("expiresAt=?");
-      values.push(parsed.toISOString());
+      values.push(expiresAt);
     }
 
-    if (fields.length === 0)
+    if (!fields.length) {
       return res.json({ message: "Không có gì để cập nhật" });
+    }
 
-    db.run(`UPDATE rentals SET ${fields.join(", ")} WHERE id=?`, [...values, id], function (err3) {
-      if (err3) return res.status(500).json({ message: err3.message });
-
-      const changes = fields.map((f, idx) => `${f.split("=")[0]}=${values[idx]}`);
-      addLog(
-        req.user?.id,
-        "Chỉnh sửa rental",
-        `Rental #${id} chỉnh sửa các trường: ${changes.join(", ")}`
-      );
-
-      if ((rental.status === "pending" || rental.status === "retrieved") && status === "active") {
-        const months = rental.rentalTime / 43200;
-        const amount =
-          (rental.pricePerTab || 150000) * (rental.tabs || 1) * months;
-
-        db.run(
-          `INSERT INTO revenues (rentalId, amount, type, createdAt)
-           VALUES (?, ?, 'new_rental', datetime('now','localtime'))`,
-          [id, amount],
-          (errRev) => {
-            if (errRev) console.error("❌ Lỗi ghi doanh thu:", errRev.message);
-            else
-              console.log(
-                `✅ Ghi doanh thu rental #${id} (${rental.roomCode}): ${amount}`
-              );
-          }
-        );
+    db.run(
+      `UPDATE rentals SET ${fields.join(", ")} WHERE id=?`,
+      [...values, id],
+      () => {
+        db.get(`SELECT * FROM rentals WHERE id=?`, [id], (e2, updated) => {
+          if (e2) return res.status(500).json({ message: "DB error" });
+          res.json({ message: "Admin edit thành công", rental: updated });
+        });
       }
-
-      db.get(`SELECT * FROM rentals WHERE id=?`, [id], (err4, updated) => {
-        if (err4) return res.status(500).json({ message: "DB error" });
-        res.json({ message: "Cập nhật thành công", rental: updated });
-      });
-    });
+    );
   });
 });
-
 
 app.delete("/rentals/:id", (req, res) => {
   const { id } = req.params;
 
-  db.run("DELETE FROM rentals WHERE id = ?", [id], function (err) {
+  // Lấy rental trước khi xóa
+  db.get("SELECT * FROM rentals WHERE id = ?", [id], (err, rental) => {
     if (err) return res.status(500).json({ message: "DB error" });
-    if (this.changes === 0) return res.status(404).json({ message: "Rental not found" });
+    if (!rental) return res.status(404).json({ message: "Rental not found" });
+
+    // Ghi log trước khi xóa
     addLog(
       req.user?.id,
       "Xóa đơn",
-      `Rental #${id} đã bị xóa khỏi hệ thống`
+      `Rental #${id} đã bị xóa khỏi hệ thống`,
+      { roomCode: rental.roomCode, tabs: rental.tabs }
     );
-    res.json({ message: "Rental deleted successfully" });
+
+    // Xóa rental
+    db.run("DELETE FROM rentals WHERE id = ?", [id], function (err2) {
+      if (err2) return res.status(500).json({ message: "DB error khi xóa" });
+      res.json({ message: "Rental deleted successfully" });
+    });
   });
 });
+
 
 app.delete("/admin/users/:id", authMiddleware, (req, res) => {
   // Chỉ admin level >= 10 mới được xóa
@@ -1166,18 +1017,6 @@ app.delete("/admin/users/:id", authMiddleware, (req, res) => {
       `Xóa user ID=${id}`
     );
     res.json({ message: `User ${id} deleted successfully` });
-  });
-});
-
-// Chỉ tạo tạm, xóa sau khi xong
-app.post('/admin/set-level', async (req, res) => {
-  const { userId, level } = req.body;
-
-  // Có thể check token admin nếu muốn
-  const sql = `UPDATE users SET level = ? WHERE id = ?`;
-  db.run(sql, [level, userId], function(err) {
-    if (err) return res.status(500).json({ message: err.message });
-    res.json({ message: `Cập nhật level user ${userId} thành ${level}` });
   });
 });
 
@@ -1223,111 +1062,257 @@ app.get("/user/logs", authMiddleware, (req, res) => {
 });
 
 
-// 🟢 User gửi yêu cầu gia hạn
-app.post("/rentals/:id/request-extend", authMiddleware, (req, res) => {
-  const { id } = req.params;
-  const { requestedExtendMonths, extendTimeInMinutes, tabs } = req.body;
+// 🟢 User gửi yêu cầu gia hạn | Admin request hộ user
+app.post("/rentals/:id/request-extend", authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { months, voucherCode } = req.body;
 
-  db.run(
-    `UPDATE rentals
-     SET status = 'pending_extend',
-         requestedExtendMonths = ?,
-         extendTimeInMinutes = ?,
-         tabs = ?
-     WHERE id = ?`,
-    [requestedExtendMonths, extendTimeInMinutes, tabs, id],
-    function (err) {
-      if (err) return res.status(500).json({ message: "DB error" });
-      addLog(
-        req.user?.id,
-        "Yêu cầu gia hạn",
-        `Gia hạn thêm ${requestedExtendMonths} tháng cho rental ${id}`
-      );
-      res.json({ message: "Yêu cầu gia hạn đã gửi, chờ admin xác nhận" });
+    if (!months || months <= 0) {
+      return res.status(400).json({ message: "Thiếu số tháng gia hạn" });
     }
-  );
+
+    // 🔥 KHÔNG check userId nữa
+    const rental = await dbGet(
+      "SELECT * FROM rentals WHERE id = ?",
+      [id]
+    );
+
+    if (!rental) {
+      return res.status(404).json({ message: "Không tìm thấy rental" });
+    }
+
+    // 🧾 Validate voucher sớm (nếu có)
+    if (voucherCode) {
+      const voucher = await dbGet(
+        `SELECT id FROM vouchers
+         WHERE code = ? AND is_active = 1`,
+        [voucherCode.toUpperCase()]
+      );
+
+      if (!voucher) {
+        return res.status(400).json({ message: "Voucher không hợp lệ" });
+      }
+    }
+
+    await dbRun(
+      `UPDATE rentals
+       SET status = 'pending_extend',
+           requestedExtendMonths = ?,
+           extendVoucherCode = ?
+       WHERE id = ?`,
+      [
+        months,
+        voucherCode ? voucherCode.toUpperCase() : null,
+        id
+      ]
+    );
+
+    res.json({
+      message: "Đã gửi yêu cầu gia hạn"
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Lỗi request extend" });
+  }
 });
 
-// 🟢 Admin xác nhận gia hạn (phiên bản đầy đủ)
+// ================= CONFIRM EXTEND =================
+app.patch("/rentals/:id/confirm-extend", authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
 
-app.patch("/rentals/:id/confirm-extend", authMiddleware, (req, res) => {
-  const { id } = req.params;
+    const rental = await dbGet(
+      "SELECT * FROM rentals WHERE id = ?",
+      [id]
+    );
 
-  db.get(`SELECT * FROM rentals WHERE id = ?`, [id], (err, rental) => {
-    if (err) return res.status(500).json({ message: "DB error" });
-    if (!rental) return res.status(404).json({ message: "Rental không tồn tại" });
+    if (!rental) {
+      return res.status(404).json({ message: "Rental không tồn tại" });
+    }
 
-    const now = Date.now();
-    const currentExpires = rental.expiresAt ? new Date(rental.expiresAt).getTime() : 0;
-    const extendMinutes = rental.extendTimeInMinutes || 0;
-    const extendMonths = rental.requestedExtendMonths || 1; // mặc định 1 tháng nếu null
+    if (rental.status !== "pending_extend") {
+      return res.status(400).json({ message: "Rental chưa có yêu cầu gia hạn" });
+    }
 
-    // Nếu chưa hết hạn → cộng vào hạn cũ, nếu hết hạn → tính từ hiện tại
-    const baseTime = currentExpires > now ? currentExpires : now;
-    const newExpiresAt = new Date(baseTime + extendMinutes * 60000).toISOString();
+    // ===== PARSE SQLITE TIME =====
+    const parseSqliteTime = (str) => {
+      if (!str) return null;
+      const ms = Date.parse(str.replace(" ", "T"));
+      return isNaN(ms) ? null : ms;
+    };
 
-    // ✅ Tính doanh thu: tháng × giá/tab × số tab
+    const nowMs = Date.now();
+    const expiresMs = parseSqliteTime(rental.expiresAt);
+
+    const baseMs =
+      expiresMs && expiresMs > nowMs
+        ? expiresMs
+        : nowMs;
+
+    const months = Number(rental.requestedExtendMonths);
+    if (!months || months <= 0) {
+      return res.status(400).json({ message: "requestedExtendMonths invalid" });
+    }
+
+    // ===== QUY ĐỔI → PHÚT =====
+    let extendMinutes = 0;
+    let unitCount = 0;
+
+    if (months >= 1) {
+      extendMinutes = months * 30 * 24 * 60;
+      unitCount = months;
+    } else {
+      const weeks = Math.round(months / 0.25);
+      extendMinutes = weeks * 7 * 24 * 60;
+      unitCount = weeks;
+    }
+
+    const newExpiresAtMs = baseMs + extendMinutes * 60 * 1000;
+    const newExpiresAt = new Date(newExpiresAtMs)
+      .toISOString()
+      .slice(0, 19)
+      .replace("T", " ");
+
+    // ===== TÍNH GIÁ =====
     const pricePerTab = rental.pricePerTab || 150000;
     const tabCount = rental.tabs || 1;
-    const revenueAmount = extendMonths * pricePerTab * tabCount;
 
-    db.run(
+    let finalPrice = unitCount * pricePerTab * tabCount;
+    let discountPercent = 0;
+
+    // ===== LẤY LEVEL USER =====
+    const user = await dbGet(
+      "SELECT level FROM users WHERE id = ?",
+      [rental.userId]
+    );
+    const userLevel = user?.level || 1;
+
+    // ===== VOUCHER (FIX CHUẨN Ở ĐÂY) =====
+    if (rental.extendVoucherCode) {
+      const voucher = await dbGet(
+        `SELECT * FROM vouchers
+         WHERE code = ? AND is_active = 1`,
+        [rental.extendVoucherCode]
+      );
+
+      if (
+        voucher &&
+        new Date(voucher.expires_at) > new Date() &&
+        (!voucher.max_uses || voucher.used_count < voucher.max_uses)
+      ) {
+        const usage = await dbGet(
+          `SELECT * FROM voucher_usages
+           WHERE voucher_id = ? AND user_id = ?`,
+          [voucher.id, rental.userId]
+        );
+
+        // ❌ user level thấp → chỉ dùng 1 lần
+        if (userLevel < 2 && usage && usage.used_count >= 1) {
+          throw new Error("Voucher chỉ được dùng 1 lần cho user level thấp");
+        }
+
+        // ✅ áp giảm giá
+        discountPercent = voucher.discount_percent || 0;
+        finalPrice = Math.round(
+          finalPrice * (100 - discountPercent) / 100
+        );
+
+        // ✅ ghi voucher usage (INSERT or UPDATE)
+        if (!usage) {
+          await dbRun(
+            `INSERT INTO voucher_usages (voucher_id, user_id, used_count, last_used_at)
+             VALUES (?, ?, 1, datetime('now'))`,
+            [voucher.id, rental.userId]
+          );
+        } else {
+          await dbRun(
+            `UPDATE voucher_usages
+             SET used_count = used_count + 1,
+                 last_used_at = datetime('now')
+             WHERE id = ?`,
+            [usage.id]
+          );
+        }
+
+        // ✅ tăng tổng lượt voucher
+        await dbRun(
+          `UPDATE vouchers
+           SET used_count = used_count + 1
+           WHERE id = ?`,
+          [voucher.id]
+        );
+      }
+    }
+
+    // ===== UPDATE RENTAL =====
+    await dbRun(
       `UPDATE rentals
        SET status = 'active',
            expiresAt = ?,
            requestedExtendMonths = NULL,
-           extendTimeInMinutes = NULL
+           extendVoucherCode = NULL
        WHERE id = ?`,
-      [newExpiresAt, id],
-      function (err2) {
-        if (err2) return res.status(500).json({ message: "DB error" });
-
-        // ✅ Ghi log hành động
-        addLog(
-          req.user?.id,
-          "Xác nhận gia hạn",
-          `Rental #${id} được admin xác nhận gia hạn ${extendMonths} tháng`
-        );
-
-        // ✅ Ghi doanh thu vào bảng revenues
-        db.run(
-          `INSERT INTO revenues (rentalId, amount, type)
-           VALUES (?, ?, 'extend')`,
-          [id, revenueAmount],
-          (err3) => {
-            if (err3) console.error("❌ Lỗi ghi doanh thu:", err3);
-            else console.log(`✅ Doanh thu +${revenueAmount} cho rental #${id}`);
-          }
-        );
-
-        res.json({
-          message: `Gia hạn thành công, cộng doanh thu ${revenueAmount.toLocaleString()}đ`,
-          rentalId: id,
-          newExpiresAt,
-        });
-      }
+      [newExpiresAt, id]
     );
-  });
+
+    // ===== DOANH THU =====
+    await dbRun(
+      `INSERT INTO revenues (rentalId, amount, type)
+       VALUES (?, ?, 'extend')`,
+      [id, finalPrice]
+    );
+
+    addLog(
+      req.user?.id,
+      "Xác nhận gia hạn",
+      `Rental #${id}, price=${finalPrice}, level=${userLevel}`
+    );
+
+    res.json({
+      message: "Gia hạn thành công",
+      rentalId: id,
+      oldExpiresAt: rental.expiresAt,
+      newExpiresAt,
+      finalPrice,
+      discountPercent
+    });
+  } catch (err) {
+    console.error("❌ CONFIRM EXTEND ERROR:", err);
+    res.status(500).json({
+      message: err.message || "Lỗi confirm extend"
+    });
+  }
 });
 
 
 
-// 🟢 Admin từ chối gia hạn
-app.patch("/rentals/:id/reject-extend", authMiddleware, (req, res) => {
+
+app.patch("/rentals/:id/reject-extend", authMiddleware, async (req, res) => {
+  if (req.user.role !== "admin") {
+    return res.status(403).json({ message: "Chỉ admin mới được từ chối" });
+  }
+
   const { id } = req.params;
 
-  db.run(
-    `UPDATE rentals
-     SET status = 'active',
-         requestedExtendMonths = NULL,
-         extendTimeInMinutes = NULL
-     WHERE id = ?`,
-    [id],
-    function (err) {
-      if (err) return res.status(500).json({ message: "DB error" });
-      res.json({ message: "Đã từ chối gia hạn", rentalId: id });
-    }
-  );
+  try {
+    await dbRun(
+      `UPDATE rentals
+       SET status = 'active',
+           requestedExtendMonths = NULL,
+           extendTimeInMinutes = NULL,
+           extendVoucherCode = NULL
+       WHERE id = ?`,
+      [id]
+    );
+
+    res.json({
+      message: "Đã từ chối gia hạn",
+      rentalId: id
+    });
+  } catch (err) {
+    res.status(500).json({ message: "DB error" });
+  }
 });
 
 // ====== API cho admin lấy WORKER_API hiện tại ======
@@ -1519,6 +1504,382 @@ app.delete("/revenues/:id", (req, res) => {
     res.json({ message: `🗑️ Đã xóa bản ghi revenues có id = ${id}` });
   });
 });
+
+app.patch("/rentals/:id/compensate", adminAuth, async (req, res) => {
+  try {
+    const { compensateMinutes } = req.body;
+    const { id } = req.params;
+
+    if (!compensateMinutes || compensateMinutes <= 0) {
+      return res.status(400).json({ message: "compensateMinutes > 0" });
+    }
+
+    const rental = await new Promise((resolve, reject) => {
+      db.get(`SELECT * FROM rentals WHERE id = ?`, [id], (err, row) => {
+        if (err) reject(err);
+        else resolve(row);
+      });
+    });
+
+    if (!rental) {
+      return res.status(404).json({ message: "Rental không tồn tại" });
+    }
+
+    // ✅ CHỈ bù cho đơn active & còn hạn
+    if (
+      rental.status !== "active" ||
+      !rental.expiresAt ||
+      new Date(rental.expiresAt).getTime() <= Date.now()
+    ) {
+      return res.status(400).json({ message: "Đơn không còn hạn" });
+    }
+
+    const newExpiresAt = new Date(
+      new Date(rental.expiresAt).getTime() + compensateMinutes * 60000
+    ).toISOString();
+
+    await new Promise((resolve, reject) => {
+      db.run(
+        `UPDATE rentals SET expiresAt = ? WHERE id = ?`,
+        [newExpiresAt, id],
+        (err) => (err ? reject(err) : resolve())
+      );
+    });
+
+    // ✅ log lại hành động
+    addLog(
+      req.user?.id,
+      "Bù thời gian",
+      `Bù ${compensateMinutes} phút cho rental #${id}`
+    );
+
+    res.json({
+      success: true,
+      rentalId: id,
+      newExpiresAt,
+    });
+  } catch (err) {
+    console.error("❌ COMPENSATE ERROR:", err);
+    res.status(500).json({ message: "Server error", error: err.message });
+  }
+});
+
+app.post("/admin/vouchers", adminAuth, async (req, res) => {
+  try {
+    const { code, discountPercent, expiresAt, maxUses } = req.body;
+    if (!code || !discountPercent)
+      return res.status(400).json({ message: "Thiếu dữ liệu" });
+
+    await dbRun(
+      `INSERT INTO vouchers (code, discount_percent, expires_at, max_uses)
+       VALUES (?, ?, ?, ?)`,
+      [
+        code.toUpperCase(),
+        discountPercent,
+        expiresAt || null,
+        maxUses || null
+      ]
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    if (err.message.includes("UNIQUE"))
+      return res.status(400).json({ message: "Voucher đã tồn tại" });
+    console.error(err);
+    res.status(500).json({ message: "Lỗi tạo voucher" });
+  }
+});
+
+app.get("/admin/vouchers", adminAuth, async (req, res) => {
+  try {
+    const rows = await dbAll(
+      "SELECT * FROM vouchers ORDER BY created_at DESC"
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Lỗi lấy danh sách voucher" });
+  }
+});
+
+app.patch("/admin/vouchers/:id", adminAuth, async (req, res) => {
+  try {
+    const { isActive, expiresAt, discountPercent, maxUses } = req.body;
+
+    await dbRun(
+      `UPDATE vouchers
+       SET is_active = ?,
+           expires_at = ?,
+           discount_percent = ?,
+           max_uses = ?
+       WHERE id = ?`,
+      [
+        isActive,
+        expiresAt || null,
+        discountPercent,
+        maxUses || null,
+        req.params.id
+      ]
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Lỗi cập nhật voucher" });
+  }
+});
+
+
+app.delete("/admin/vouchers/:id", adminAuth, async (req, res) => {
+  try {
+    await dbRun("DELETE FROM vouchers WHERE id = ?", [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Lỗi xóa voucher" });
+  }
+});
+
+app.post("/vouchers/validate", authMiddleware, async (req, res) => {
+  try {
+    const { code } = req.body;
+    const userId = req.user.id;
+    const userLevel = req.user.level || 1;
+
+    const voucher = await dbGet(
+      `SELECT * FROM vouchers
+       WHERE code = ? AND is_active = 1`,
+      [code.toUpperCase()]
+    );
+
+    if (!voucher)
+      return res.status(400).json({ message: "Voucher không tồn tại" });
+
+    if (voucher.expires_at && new Date(voucher.expires_at) < new Date())
+      return res.status(400).json({ message: "Voucher đã hết hạn" });
+
+    if (voucher.max_uses && voucher.used_count >= voucher.max_uses)
+      return res.status(400).json({ message: "Voucher đã hết lượt dùng" });
+
+    // 👉 CHỈ CHECK ĐÃ DÙNG KHI LEVEL < 2
+    if (userLevel < 2) {
+      const used = await dbGet(
+        `SELECT 1 FROM voucher_usages
+         WHERE voucher_id = ? AND user_id = ?`,
+        [voucher.id, userId]
+      );
+
+      if (used) {
+        return res.status(400).json({
+          message: "Voucher chỉ dùng 1 lần với tài khoản level thấp"
+        });
+      }
+    }
+
+    res.json({
+      discountPercent: voucher.discount_percent
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Lỗi kiểm tra voucher" });
+  }
+});
+// ================== CREATE RENTAL EXCEPTION ==================
+app.post("/admin/rental-exceptions", adminAuth, async (req, res) => {
+  try {
+    const {
+      customerName,
+      machineCount,
+      price,
+      rentType, // month | week
+      createdAt // mới thêm
+    } = req.body;
+
+    if (!customerName || !machineCount || !price || !rentType || !createdAt) {
+      return res.status(400).json({ message: "Thiếu dữ liệu" });
+    }
+
+    if (!["month", "week"].includes(rentType)) {
+      return res.status(400).json({ message: "rentType không hợp lệ" });
+    }
+
+    const totalAmount = Number(machineCount) * Number(price);
+
+    // Chuyển createdAt về định dạng ISO (hoặc SQLite chấp nhận)
+    const createdAtISO = new Date(createdAt).toISOString();
+
+    // 1️⃣ Insert rental exception
+    const result = await dbRun(
+      `
+      INSERT INTO rental_exceptions
+      (customerName, machineCount, price, rentType, totalAmount, status, createdAt)
+      VALUES (?, ?, ?, ?, ?, 'rent', ?)
+      `,
+      [customerName, machineCount, price, rentType, totalAmount, createdAtISO]
+    );
+
+    const exceptionId = result.lastID;
+
+    // 2️⃣ Ghi doanh thu
+    await dbRun(
+      `
+      INSERT INTO revenues (rentalId, amount, type)
+      VALUES (?, ?, 'exception')
+      `,
+      [exceptionId, totalAmount]
+    );
+
+    // 3️⃣ Log
+    addLog(
+      req.user?.id,
+      "Tạo rental ngoại lệ",
+      `Khách=${customerName}, loại=${rentType}, máy=${machineCount}, tiền=${totalAmount}, bắt đầu=${createdAtISO}`
+    );
+
+    res.json({
+      message: "Tạo rental ngoại lệ thành công",
+      id: exceptionId,
+      totalAmount,
+      createdAt: createdAtISO
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Lỗi tạo rental ngoại lệ" });
+  }
+});
+
+
+// ================== UPDATE RENTAL EXCEPTION ==================
+app.patch("/admin/rental-exceptions/:id", adminAuth, async (req, res) => {
+  try {
+    const { customerName, machineCount, price, rentType, status, createdAt } = req.body;
+
+    if (!customerName || !machineCount || !price || !rentType || !status || !createdAt) {
+      return res.status(400).json({ message: "Thiếu dữ liệu" });
+    }
+
+    if (!["month", "week"].includes(rentType)) {
+      return res.status(400).json({ message: "rentType không hợp lệ" });
+    }
+
+    if (!["rent", "stop"].includes(status)) {
+      return res.status(400).json({ message: "status không hợp lệ" });
+    }
+
+    const totalAmount = Number(machineCount) * Number(price);
+    const createdAtISO = new Date(createdAt).toISOString();
+
+    await dbRun(
+      `
+      UPDATE rental_exceptions SET
+        customerName = ?,
+        machineCount = ?,
+        price = ?,
+        rentType = ?,
+        totalAmount = ?,
+        status = ?,
+        createdAt = ?
+      WHERE id = ?
+      `,
+      [
+        customerName,
+        machineCount,
+        price,
+        rentType,
+        totalAmount,
+        status,
+        createdAtISO,
+        req.params.id
+      ]
+    );
+
+    addLog(
+      req.user?.id,
+      "Cập nhật rental ngoại lệ",
+      `ID=${req.params.id}, loại=${rentType}, trạng thái=${status}, bắt đầu=${createdAtISO}`
+    );
+
+    res.json({ message: "Cập nhật rental ngoại lệ thành công", createdAt: createdAtISO });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Lỗi cập nhật rental ngoại lệ" });
+  }
+});
+
+
+// ================== GET ALL RENTAL EXCEPTIONS ==================
+app.get("/admin/rental-exceptions", adminAuth, async (req, res) => {
+  try {
+    const rows = await dbAll(`
+      SELECT *
+      FROM rental_exceptions
+      ORDER BY createdAt DESC
+    `);
+
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Lỗi lấy danh sách rental ngoại lệ" });
+  }
+});
+
+
+// ================== GET RENTAL EXCEPTION BY ID ==================
+app.get("/admin/rental-exceptions/:id", adminAuth, async (req, res) => {
+  try {
+    const row = await dbGet(
+      `SELECT * FROM rental_exceptions WHERE id = ?`,
+      [req.params.id]
+    );
+
+    if (!row) {
+      return res.status(404).json({ message: "Không tìm thấy rental ngoại lệ" });
+    }
+
+    res.json(row);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Lỗi lấy rental ngoại lệ" });
+  }
+});
+
+
+app.patch("/admin/rental-exceptions/:id/status", adminAuth, async (req, res) => {
+  const { status } = req.body;
+
+  if (!["rent", "stop"].includes(status)) {
+    return res.status(400).json({ message: "Status invalid" });
+  }
+
+  await dbRun(
+    `UPDATE rental_exceptions SET status=? WHERE id=?`,
+    [status, req.params.id]
+  );
+
+  res.json({ message: "Status updated", status });
+});
+
+// ================== DELETE RENTAL EXCEPTION ==================
+app.delete("/admin/rental-exceptions/:id", adminAuth, async (req, res) => {
+  try {
+    await dbRun(
+      `DELETE FROM rental_exceptions WHERE id = ?`,
+      [req.params.id]
+    );
+
+    addLog(
+      req.user?.id,
+      "Xóa rental ngoại lệ",
+      `ID=${req.params.id}`
+    );
+
+    res.json({ message: "Xóa rental ngoại lệ thành công" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Lỗi xóa rental ngoại lệ" });
+  }
+});
+
 
 
 // ====== Background auto-expire (mỗi 30 giây) ======
